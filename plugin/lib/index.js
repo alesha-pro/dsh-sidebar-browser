@@ -64,7 +64,7 @@ async function pickGuest (port, want) {
   const list = guests(all)
   if (list.length === 0) {
     throw new Error(
-      'no sidebar Browser tab is open. Open one in the right sidebar (Browser) and retry — '
+      'no sidebar Browser tab is open. Call browser_open with a URL, or open one by hand in the right sidebar — '
       + 'the guest is created lazily, so the port alone is not enough.',
     )
   }
@@ -276,7 +276,7 @@ function apply (ctx, config) {
     return session.eval('location.href')
   }
 
-  const PORT_NOTE = `Drives the built-in Browser tab of DSH Desktop (the sidebar <webview>). Needs the app started with --remote-debugging-port=${port} and a Browser tab open in the right sidebar.`
+  const PORT_NOTE = `Drives the built-in Browser tab of DSH Desktop (the sidebar <webview>). Needs the app started with --remote-debugging-port=${port} and a Browser tab open in the right sidebar (browser_open creates one).`
 
   ctx.tools.register(defineTool({
     name: 'browser_tabs',
@@ -668,6 +668,108 @@ function apply (ctx, config) {
       })
       return `${dir}\n${lines.join('\n')}`
     },
+  }))
+
+  /**
+   * Opening and closing tabs is the one job the guest cannot do for itself: the
+   * shell owns the sidebar and creates guests lazily. These two tools therefore
+   * attach to the app window (`dsh-app://`) and press the same controls a person
+   * would, located by the shell's own `data-*` hooks rather than by label text,
+   * so they do not depend on the UI language. Measured on DSH Desktop 0.2.0-rc.2.
+   */
+  const withShell = async body => {
+    const all = await listTargets(port)
+    const shell = all.find(t => t.type === 'page' && String(t.url).startsWith('dsh-app://'))
+    if (!shell) throw new Error('the DSH app window is not reachable on the debug port')
+    const session = await Session.connect(shell)
+    try {
+      return await body(session)
+    } finally {
+      session.close()
+    }
+  }
+
+  /** Helpers evaluated inside the app window. Hidden duplicates of the sidebar header exist, so only visible nodes count. */
+  const SHELL_JS = `
+    const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 }
+    const one = sel => [...document.querySelectorAll(sel)].find(vis)
+    const tabs = () => [...document.querySelectorAll('[data-dockkit-tab]')].filter(vis)
+      .filter(e => !e.hasAttribute('data-dockkit-tab-quiet'))
+      .map(e => ({ id: e.getAttribute('data-dockkit-tab'), title: e.innerText.trim(), active: e.getAttribute('aria-selected') === 'true' }))
+    const address = () => {
+      const tab = [...document.querySelectorAll('[data-dockkit-tab]')].find(vis)
+      for (let node = tab; node; node = node.parentElement) {
+        const input = [...node.querySelectorAll('input')].find(e => vis(e) && e.type !== 'checkbox')
+        if (input) return input
+      }
+      return null
+    }
+  `
+  const shellEval = (session, body) => session.eval(`(() => { ${SHELL_JS}\n${body} })()`)
+  const sidebarTabs = session => shellEval(session, 'return tabs()')
+  const renderTabs = list => list.length === 0
+    ? 'no sidebar tabs'
+    : list.map(tab => `  ${tab.active ? '*' : ' '} ${tab.title.slice(0, 70)}`).join('\n')
+
+  ctx.tools.register(defineTool({
+    name: 'browser_open',
+    description: `Open a new Browser tab in DSH Desktop's right sidebar, expanding the sidebar if it is collapsed, and optionally load a URL in it. Use this when no Browser tab is open or when a separate tab is wanted; use browser_navigate to change the page of the current tab. This is the only way to create a tab: the page tools cannot. Needs the app started with --remote-debugging-port=${port}.`,
+    parameters: { url: { type: 'string', description: 'Address to load, absolute or a bare host. Omit to open an empty tab.' } },
+    output: textOutput,
+    execute: args => withShell(async session => {
+      const before = guests(await listTargets(port)).map(t => t.id)
+      const click = sel => shellEval(session, `const e = one(${JSON.stringify(sel)}); if (e) e.click(); return Boolean(e)`)
+      if (await click('[data-sidebar-right-expand]')) await sleep(600)
+      // The Browser card lives on the sidebar's start page; "new tab" brings that page up.
+      if (!await shellEval(session, `return Boolean(one('[data-sidebar-right-guide-entry="browser"]'))`)) {
+        if (!await click('[data-dockkit-add-tab]')) throw new Error('could not find the new-tab button in the right sidebar')
+        await sleep(600)
+      }
+      if (!await click('[data-sidebar-right-guide-entry="browser"]')) {
+        throw new Error('the Browser entry is missing from the sidebar start page; is the built-in browser enabled?')
+      }
+      await sleep(700)
+      if (!args.url) return `opened an empty Browser tab\n${renderTabs(await sidebarTabs(session))}`
+
+      const url = /^[a-z]+:\/\//i.test(args.url) ? args.url : `https://${args.url}`
+      const focused = await shellEval(session, 'const input = address(); if (!input) return false; input.focus(); input.select(); return true')
+      if (!focused) throw new Error('opened a Browser tab but could not find its address field')
+      await session.send('Input.insertText', { text: url })
+      const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r' }
+      await session.send('Input.dispatchKeyEvent', { type: 'keyDown', ...enter })
+      await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...enter })
+      for (let i = 0; i < 40; i++) {
+        await sleep(250)
+        const fresh = guests(await listTargets(port)).find(t => !before.includes(t.id))
+        if (fresh) return `opened ${fresh.url}\n${renderTabs(await sidebarTabs(session))}`
+      }
+      throw new Error(`the tab opened but no page appeared for ${url} within 10 s`)
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_close',
+    description: `Close a tab in DSH Desktop's right sidebar, or collapse the sidebar. With no arguments it closes the active tab. Sidebar tabs can also be files or terminals, so pass a title fragment when the active tab may not be the browser. Collapsing keeps the tabs. Needs the app started with --remote-debugging-port=${port}.`,
+    parameters: {
+      tab: { type: 'string', description: 'Fragment of the tab title to close; omit for the active tab.' },
+      sidebar: { type: 'boolean', description: 'Collapse the right sidebar instead of closing a tab.' },
+    },
+    output: textOutput,
+    execute: args => withShell(async session => {
+      if (args.sidebar) {
+        const done = await shellEval(session, `const e = one('[data-sidebar-right-toggle]'); if (e) e.click(); return Boolean(e)`)
+        return done ? 'collapsed the right sidebar; its tabs are kept' : 'the right sidebar is already collapsed'
+      }
+      const list = await sidebarTabs(session)
+      if (list.length === 0) return 'no sidebar tab is open (the sidebar may be collapsed)'
+      const want = String(args.tab ?? '').toLowerCase()
+      const hit = want ? list.find(tab => tab.title.toLowerCase().includes(want)) : list.find(tab => tab.active)
+      if (!hit) return `no sidebar tab matches "${args.tab}"\n${renderTabs(list)}`
+      const closed = await shellEval(session, `const e = document.querySelector('[data-dockkit-tab-close="${hit.id}"]'); if (e) e.click(); return Boolean(e)`)
+      if (!closed) throw new Error(`could not find the close button of "${hit.title}"`)
+      await sleep(500)
+      return `closed "${hit.title}"\n${renderTabs(await sidebarTabs(session))}`
+    }),
   }))
 }
 

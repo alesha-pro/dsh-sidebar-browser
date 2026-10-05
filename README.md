@@ -2,7 +2,7 @@
 
 **English** · [Русский](README.ru.md)
 
-A plugin for DSH Desktop (DeepSeek Harness) that lets the model use the built-in browser. It adds 15 `browser_*` tools that read, click, type, scroll and screenshot the Browser tab in the right sidebar, which is the same tab you are looking at.
+A plugin for DSH Desktop (DeepSeek Harness) that lets the model use the built-in browser. It adds 17 `browser_*` tools that open and close tabs in the right sidebar and read, click, type, scroll and screenshot the page in them. It is the same Browser tab you are looking at.
 
 <p align="center">
   <img src="docs/demo.gif" alt="DeepSeek V4.1 Flash in DSH Desktop opens Wikipedia in the sidebar browser, finds the RTX 3090 article and highlights the 24 GB cell" width="800">
@@ -28,7 +28,7 @@ The tools need a debug port, so quit DSH Desktop and start it like this:
 open -a "DeepSeek Harness" --args --remote-debugging-port=9222
 ```
 
-Open the Browser tab in the right sidebar and ask the agent to do something in it. A plugin installed this way lives in the `desktop` profile and is available in every workspace.
+Ask the agent to do something in the browser. It opens a tab itself with `browser_open`, or works in a Browser tab you already have open in the right sidebar. A plugin installed this way lives in the `desktop` profile and is available in every workspace.
 
 The same install from a terminal, with the app closed:
 
@@ -60,13 +60,15 @@ node plugin/selftest.mjs
 
 * DSH Desktop 0.2.0-rc.2. I measured everything here on that build (Electron 44, Chrome 152) on macOS. Windows and Linux are untested.
 * The app has to be started with `--remote-debugging-port`. Without it the tools still register, and every call returns an error that tells you how to start the app.
-* A Browser tab has to be open in the right sidebar. The shell creates the webview lazily, so the port alone is not enough.
+* The page tools need a Browser tab that has loaded a URL. The shell creates the webview lazily, so `browser_open` or a tab opened by hand has to come first.
 * Node.js 20 or newer for the CLI. The plugin itself runs inside the app.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
+| `browser_open` | opens a new Browser tab, expands the sidebar if it is collapsed, and loads a URL |
+| `browser_close` | closes a sidebar tab by title or the active one, or collapses the sidebar |
 | `browser_tabs` | lists sidebar tabs and shows which one is controlled |
 | `browser_snapshot` | title, URL and a numbered list of interactive elements |
 | `browser_navigate` | opens a URL in the current tab |
@@ -108,7 +110,9 @@ all targets:
 !! puppeteer cannot see the webview as a page
 ```
 
-An agent attached that way would click around the harness interface. This plugin reads `/json/list`, keeps only targets with `type === 'webview'`, and talks to that target's own `webSocketDebuggerUrl`. The app shell is filtered out before a connection is made. Both probes are in `probes/` if you want to reproduce the result.
+An agent attached that way would click around the harness interface. This plugin reads `/json/list`, keeps only targets with `type === 'webview'`, and talks to that target's own `webSocketDebuggerUrl`. The page tools filter the app shell out before a connection is made. Both probes are in `probes/` if you want to reproduce the result.
+
+Opening and closing tabs is different, because the shell owns the sidebar and a page cannot create its own tab. `browser_open` and `browser_close` attach to the app window and press its own controls: expand the sidebar, new tab, the Browser entry, the address field, the close button of a tab. They find those controls by the shell's `data-*` attributes, which do not change with the UI language. The attributes are internal to DSH Desktop 0.2.0-rc.2 and a later build can rename them.
 
 ## CLI
 
@@ -158,6 +162,7 @@ Vault files are written with mode `600` into a `700` directory. They hold live s
 |---|---|
 | `Page.captureScreenshot` with `captureBeyondViewport` | The image repeats the viewport instead of showing the full page. The DOM had 1 `<h1>` and 1 infobox while the image had 3 copies. `full: true` scrolls and captures slices instead |
 | `Page.reload` on the webview | It can take the CDP target down. Reload is implemented as a navigation to the current URL |
+| Keyboard shortcuts | `Cmd+T` sent over CDP does not open a tab, so `browser_open` clicks the controls instead |
 | Target disappearing mid-call | Pending commands reject with a hint to reopen the tab |
 | SPA scrolling | `window.scrollY` stays at 0 while an inner container scrolls. The tools find the element that scrolls and report its position |
 | Tall screenshots | The image reader in DSH rejects images over 8192 px per side, which is one more reason long pages come back as slices |

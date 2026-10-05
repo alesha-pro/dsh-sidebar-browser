@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-browser-cdp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drive DSH Desktop's built-in sidebar browser (Electron <webview>) over raw CDP",
   "type": "module",
   "main": "lib/index.js",

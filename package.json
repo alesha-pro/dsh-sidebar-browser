@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Drive DSH Desktop's built-in sidebar browser: a plugin with browser_* tools plus a standalone raw-CDP CLI",
   "type": "module",

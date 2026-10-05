@@ -31,7 +31,7 @@
   <text x="68" y="226" class="sans text" font-size="17" font-weight="600">dsh-sidebar-browser</text>
   <text x="68" y="250" class="mono accent" font-size="13">browser_snapshot  browser_click</text>
   <text x="68" y="270" class="mono accent" font-size="13">browser_type  browser_screenshot</text>
-  <text x="68" y="288" class="sans dim" font-size="12">15 tools</text>
+  <text x="68" y="288" class="sans dim" font-size="12">17 tools</text>
 
   <text x="48" y="336" class="mono dim" font-size="12">raw CDP over ws://127.0.0.1:9222</text>
   <text x="48" y="356" class="mono dim" font-size="12">target type: webview</text>

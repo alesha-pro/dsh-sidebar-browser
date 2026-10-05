@@ -30,6 +30,8 @@ staying silent.
 
 | Tool | What it does |
 |---|---|
+| `browser_open` | open a new Browser tab (expands the sidebar) and load a URL |
+| `browser_close` | close a sidebar tab by title or the active one, or collapse the sidebar |
 | `browser_tabs` | list sidebar tabs and show which one is controlled |
 | `browser_snapshot` | title, URL, and a numbered inventory of interactive elements |
 | `browser_navigate` | go to a URL in the current tab |
@@ -86,7 +88,7 @@ npm install
 DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 "$DSH" plugin --profile desktop add "$PWD"
 
-# 15 tools, live calls, and the error path, without restarting the app
+# 17 tools, live calls, and the error path, without restarting the app
 node selftest.mjs
 ```
 
