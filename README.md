@@ -20,13 +20,11 @@ Open **Plugins** in DSH Desktop, press **Add plugin** and paste this address:
 github:alesha-pro/dsh-sidebar-browser#path:/plugin
 ```
 
-The same plugin is on npm, so this also works in that field:
+The same plugin is on npm, so the package name also works in that field:
 
 ```
-dsh-sidebar-browser-cdp@0.2.0
+dsh-sidebar-browser-cdp
 ```
-
-Keep the version in the name. DSH installs through pnpm, and pnpm skips versions published less than a day ago when you give it a bare name.
 
 Press **Install**, then **Enable now**. DSH downloads the plugin and its dependencies itself. The tools show up in the next new session, and I did not have to restart the app for that.
 
