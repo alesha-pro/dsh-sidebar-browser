@@ -1,0 +1,22 @@
+{
+  "name": "dsh-sidebar-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drive DSH Desktop's built-in sidebar browser: a plugin with browser_* tools plus a standalone raw-CDP CLI",
+  "type": "module",
+  "license": "MIT",
+  "author": "Alexey Fateev <https://github.com/alesha-pro>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alesha-pro/dsh-sidebar-browser.git"
+  },
+  "scripts": {
+    "tabs": "node cli/browser.mjs tabs",
+    "snapshot": "node cli/browser.mjs snapshot",
+    "selftest": "node plugin/selftest.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0",
+    "puppeteer-core": "^25.12.0"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "name": "dsh-sidebar-browser-cdp",
+  "version": "0.1.0",
+  "description": "Drive DSH Desktop's built-in sidebar browser (Electron <webview>) over raw CDP",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "browser",
+    "cdp",
+    "webview",
+    "electron"
+  ],
+  "license": "MIT",
+  "author": "Alexey Fateev <https://github.com/alesha-pro>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alesha-pro/dsh-sidebar-browser.git",
+    "directory": "plugin"
+  },
+  "homepage": "https://github.com/alesha-pro/dsh-sidebar-browser#readme",
+  "bugs": {
+    "url": "https://github.com/alesha-pro/dsh-sidebar-browser/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  }
+}

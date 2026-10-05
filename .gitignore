@@ -1,0 +1,16 @@
+# dependencies: the plugin is installed as a `link:` into the DSH profile, so its
+# imports resolve from its own folder. Restore with `npm install` inside plugin/.
+node_modules/
+.npm-cache/
+
+# macOS and editor noise
+.DS_Store
+*.log
+
+# cookie vaults are secrets: live session tokens, never commit them
+cookie-vault/
+*vault*.json
+
+# scratch output from screenshot/scroll runs
+shots/
+dsh-selftest-*.png

@@ -1,0 +1,14 @@
+# Bundle layer for dsh-sidebar-browser-cdp.
+#
+# Mounts the tools that drive DSH Desktop's built-in sidebar browser over raw
+# CDP. The plugin itself has no client half: the page is rendered by the shell's
+# own Browser tab, this only adds the model-facing tools.
+- insert:
+    - id: sidebar-browser-cdp
+      name: 'dsh-sidebar-browser-cdp'
+      config:
+        # Must match the port the desktop app is started with:
+        #   open -a "DeepSeek Harness" --args --remote-debugging-port=9222
+        port: 9222
+        # Optional: pin one sidebar tab by id or URL fragment; empty = first tab.
+        tab: ''
