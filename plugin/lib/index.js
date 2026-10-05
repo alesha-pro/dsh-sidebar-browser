@@ -3,8 +3,8 @@
  *
  * The built-in browser tab is an Electron `<webview>` guest. Electron reports it
  * over CDP as `type: "webview"`, which Playwright and Puppeteer both ignore (they
- * only enumerate `page` targets), so every browser plugin built on them ends up
- * attached to the app shell (`dsh-app://app/`) instead of the page the user sees.
+ * only enumerate `page` targets), so a client built on them that attaches to the
+ * app's debug port finds only the app shell (`dsh-app://app/`), not the page.
  * This plugin talks raw CDP to the guest's own websocket endpoint, so the agent
  * works in exactly the tab that is visible in the right sidebar.
  *
@@ -393,7 +393,7 @@ function apply (ctx, config) {
     output: textOutput,
     execute: args => withSession(undefined, async session => {
       const before = await session.eval(SCROLL_INFO_JS)
-      // Sites that scroll an inner container are the common case (Civitai, SPA
+      // Sites that scroll an inner container are the common case (SPA
       // shells); window.scrollY stays 0 there, so the target is resolved first
       // and the report names whichever element actually moved.
       const moved = await session.eval(`(() => {

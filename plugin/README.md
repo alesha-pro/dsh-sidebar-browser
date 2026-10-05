@@ -7,10 +7,10 @@ built-in browser** — the very Browser tab in the right sidebar.
 
 The built-in browser is an Electron `<webview>`. Electron exposes it as a target
 of type `webview`, while Playwright and Puppeteer enumerate only targets of type
-`page`. That is why every browser plugin built on them — including the official
-`dsh-experimental-browser-use-*-mcp` providers — attaches to the app shell
-(`dsh-app://app/`) instead of the page. Measured on a live app; reproducible with
-the probes in this repository (`../probes/probe.mjs`, `../probes/pp-test.mjs`).
+`page`. A client built on them that attaches to the app's debug port finds only
+the app shell (`dsh-app://app/`), not the page. Measured on a live app with
+`playwright-core` and `puppeteer-core`; the probes are in this repository
+(`../probes/probe.mjs`, `../probes/pp-test.mjs`).
 
 This plugin therefore talks to the guest's own `webSocketDebuggerUrl` from
 `/json/list` and selects targets strictly by `type === 'webview'`, so the app
@@ -74,12 +74,13 @@ The directory is configurable through `vaultDir`.
 ## Install and maintenance
 
 ```sh
-# install into the desktop profile
-dsh plugin --profile desktop add /path/to/this/plugin
-
-# dependencies: the plugin is linked (link:), so its imports resolve from its own
-# folder — node_modules here is required
+# dependencies first: the plugin is linked (link:), so its imports resolve from
+# its own folder and node_modules here is required
 npm install
+
+# install into the desktop profile (the app bundles its own dsh CLI)
+DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+"$DSH" plugin --profile desktop add "$PWD"
 
 # verify without restarting the app: 15 tools, live calls, and the error path
 node selftest.mjs
