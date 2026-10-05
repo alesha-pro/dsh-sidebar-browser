@@ -14,30 +14,43 @@
 
 ## Быстрый старт
 
-Плагин ставится в профиль `desktop`. Плагин из профиля доступен в любом workspace.
+Открой **Plugins** в DSH Desktop, нажми **Add plugin** и вставь этот адрес:
 
-```sh
-git clone https://github.com/alesha-pro/dsh-sidebar-browser.git
-cd dsh-sidebar-browser/plugin
-npm install
-
-DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
-"$DSH" plugin --profile desktop add "$PWD"
+```
+github:alesha-pro/dsh-sidebar-browser#path:/plugin
 ```
 
-Приложение несёт свой `dsh` CLI по этому пути, глобальная установка не нужна. Если `dsh` уже есть в `PATH`, можно вызвать его.
+Нажми **Install**, потом **Enable now**. DSH сам скачает плагин и его зависимости. Инструменты появляются в следующей новой сессии, перезапускать приложение ради этого мне не пришлось.
 
-Выйди из DSH Desktop и запусти его с отладочным портом:
+Инструментам нужен отладочный порт, поэтому выйди из DSH Desktop и запусти его так:
 
 ```sh
 open -a "DeepSeek Harness" --args --remote-debugging-port=9222
 ```
 
-Открой вкладку Browser в правой панели и попроси агента что-нибудь в ней сделать. Инструменты появляются в сессиях, начатых после перезапуска.
+Открой вкладку Browser в правой панели и попроси агента что-нибудь в ней сделать. Плагин, установленный так, живёт в профиле `desktop` и доступен в любом workspace.
 
-`npm install` внутри `plugin/` обязателен, потому что `dsh plugin add <путь>` подключает папку ссылкой и не копирует её. Импорты плагина (`@deepseek-ai/dsh-tools`, `@deepseek-ai/schemastery`) резолвятся от его собственного каталога, и без `node_modules` там бандл не загрузится.
+Та же установка из терминала, при закрытом приложении:
 
-Плагин можно проверить до перезапуска приложения. Селфтест загружает настоящий код плагина с подставным контекстом и вызывает его против живого отладочного порта:
+```sh
+DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+"$DSH" plugin --profile desktop add "github:alesha-pro/dsh-sidebar-browser#path:/plugin"
+```
+
+Приложение несёт свой `dsh` CLI по этому пути. Если `dsh` уже есть в `PATH`, можно вызвать его.
+
+### Установка из локального клона
+
+Этот способ нужен, если хочешь править плагин. `dsh plugin add <путь>` подключает папку ссылкой и не копирует её, поэтому плагину нужен собственный `node_modules`.
+
+```sh
+git clone https://github.com/alesha-pro/dsh-sidebar-browser.git
+cd dsh-sidebar-browser/plugin
+npm install
+"$DSH" plugin --profile desktop add "$PWD"
+```
+
+Селфтест загружает код плагина с подставным контекстом и вызывает его против живого отладочного порта, так можно проверить правку до перезапуска приложения:
 
 ```sh
 node plugin/selftest.mjs

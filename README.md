@@ -14,30 +14,43 @@ DSH Desktop ships that browser for the human only. The package `@deepseek-ai/dsh
 
 ## Quick start
 
-Install the plugin into the `desktop` profile. A plugin installed into a profile is available in every workspace.
+Open **Plugins** in DSH Desktop, press **Add plugin** and paste this address:
 
-```sh
-git clone https://github.com/alesha-pro/dsh-sidebar-browser.git
-cd dsh-sidebar-browser/plugin
-npm install
-
-DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
-"$DSH" plugin --profile desktop add "$PWD"
+```
+github:alesha-pro/dsh-sidebar-browser#path:/plugin
 ```
 
-The desktop app bundles its own `dsh` CLI at that path, so you do not need a global install. If `dsh` is already on your `PATH`, use it instead.
+Press **Install**, then **Enable now**. DSH downloads the plugin and its dependencies itself. The tools show up in the next new session, and I did not have to restart the app for that.
 
-Quit DSH Desktop and start it with a debug port:
+The tools need a debug port, so quit DSH Desktop and start it like this:
 
 ```sh
 open -a "DeepSeek Harness" --args --remote-debugging-port=9222
 ```
 
-Open the Browser tab in the right sidebar and ask the agent to do something in it. The tools appear in sessions started after the restart.
+Open the Browser tab in the right sidebar and ask the agent to do something in it. A plugin installed this way lives in the `desktop` profile and is available in every workspace.
 
-`npm install` inside `plugin/` is required because `dsh plugin add <path>` links the folder instead of copying it. The plugin's imports (`@deepseek-ai/dsh-tools`, `@deepseek-ai/schemastery`) then resolve from its own directory, and the bundle fails to load when `node_modules` is missing there.
+The same install from a terminal, with the app closed:
 
-You can check the plugin before restarting the app. The self-test loads the real plugin code with a stub context and calls it against the live debug port:
+```sh
+DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+"$DSH" plugin --profile desktop add "github:alesha-pro/dsh-sidebar-browser#path:/plugin"
+```
+
+The desktop app bundles its own `dsh` CLI at that path. If `dsh` is already on your `PATH`, use it instead.
+
+### Install from a local clone
+
+Use this when you want to edit the plugin. `dsh plugin add <path>` links the folder instead of copying it, so the plugin needs its own `node_modules`.
+
+```sh
+git clone https://github.com/alesha-pro/dsh-sidebar-browser.git
+cd dsh-sidebar-browser/plugin
+npm install
+"$DSH" plugin --profile desktop add "$PWD"
+```
+
+The self-test loads the plugin code with a stub context and calls it against the live debug port, which lets you check an edit before restarting the app:
 
 ```sh
 node plugin/selftest.mjs
@@ -158,7 +171,7 @@ Vault files are written with mode `600` into a `700` directory. They hold live s
 
 ## Uninstall
 
-Remove the bundle on the Plugins page, or delete `dsh-sidebar-browser-cdp` from `dependencies` and from `dsh.profile.bundles` in `~/.dsh/profiles/desktop/package.json`. Delete `~/.dsh/cookie-vault/` if you exported any cookies.
+Uninstall the bundle on the Plugins page, or delete `dsh-sidebar-browser-cdp` from `dependencies` and from `dsh.profile.bundles` in `~/.dsh/profiles/desktop/package.json`. Delete `~/.dsh/cookie-vault/` if you exported any cookies.
 
 ## Layout
 

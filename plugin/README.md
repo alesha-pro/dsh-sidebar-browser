@@ -73,16 +73,20 @@ The directory is configurable through `vaultDir`.
 
 ## Install and maintenance
 
-```sh
-# dependencies first: the plugin is linked (link:), so its imports resolve from
-# its own folder and node_modules here is required
-npm install
+In DSH Desktop open Plugins, press Add plugin and paste
+`github:alesha-pro/dsh-sidebar-browser#path:/plugin`. DSH installs the plugin
+and its dependencies. `@deepseek-ai/dsh-tools` and `@deepseek-ai/cordis` are
+peer dependencies and come from the running app.
 
-# install into the desktop profile (the app bundles its own dsh CLI)
+For development, link a local clone instead. A linked folder resolves imports
+from its own directory, so it needs `node_modules`:
+
+```sh
+npm install
 DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 "$DSH" plugin --profile desktop add "$PWD"
 
-# verify without restarting the app: 15 tools, live calls, and the error path
+# 15 tools, live calls, and the error path, without restarting the app
 node selftest.mjs
 ```
 
