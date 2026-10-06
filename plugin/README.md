@@ -1,30 +1,33 @@
 # dsh-sidebar-browser-cdp
 
-A DSH plugin that gives the agent `browser_*` tools operating **DSH Desktop's
-built-in browser** — the very Browser tab in the right sidebar.
+A DSH plugin that lets the agent use DSH Desktop's built-in browser, the
+Browser tab in the right sidebar. It adds 17 `browser_*` tools and works with
+the app started the normal way.
 
-## Why raw CDP, and not Playwright or Puppeteer
+Full documentation: https://github.com/alesha-pro/dsh-sidebar-browser
 
-The built-in browser is an Electron `<webview>`. Electron exposes it as a target
-of type `webview`, while Playwright and Puppeteer enumerate only targets of type
-`page`. A client built on them that attaches to the app's debug port finds only
-the app shell (`dsh-app://app/`), not the page. Measured on a live app with
-`playwright-core` and `puppeteer-core`; the probes are in this repository
-(`../probes/probe.mjs`, `../probes/pp-test.mjs`).
+## Install
 
-This plugin therefore talks to the guest's own `webSocketDebuggerUrl` from
-`/json/list` and selects targets strictly by `type === 'webview'`, so the app
-shell can never be picked by accident.
+In DSH Desktop open Plugins, press Add plugin and enter
+`dsh-sidebar-browser-cdp`. Press Install, then Enable now, and start a new
+session. `@deepseek-ai/dsh-tools` and `@deepseek-ai/cordis` are peer
+dependencies and come from the running app.
 
-## Requirement
+## Two transports
 
-```sh
-open -a "DeepSeek Harness" --args --remote-debugging-port=9222
-```
+The plugin has a host half (`lib/index.js`, the tools) and a client half
+(`lib/client.js`) that DSH loads into its own window. By default a tool call
+goes to the window, which drives the sidebar `<webview>` with the element's own
+methods and the sidebar service. No launch flag is involved.
 
-Plus an open Browser tab in the right sidebar (the guest is created lazily). The
-port is loopback-only; without it the tools return an actionable error instead of
-staying silent.
+Started with `--remote-debugging-port=9222`, the app also accepts raw CDP on the
+webview target. That path is required for `browser_cookies_export`, because a
+login lives in `HttpOnly` cookies that no page script can read, and it turns
+`browser_screenshot` into a pixel capture. Without the port a screenshot is
+rendered in-page from the DOM by the vendored modern-screenshot library
+(`lib/vendor/`, MIT).
+
+The `transport` setting picks the path: `auto` (default), `window` or `cdp`.
 
 ## Tools
 
@@ -32,7 +35,7 @@ staying silent.
 |---|---|
 | `browser_open` | open a new Browser tab (expands the sidebar) and load a URL |
 | `browser_close` | close a sidebar tab by title or the active one, or collapse the sidebar |
-| `browser_tabs` | list sidebar tabs and show which one is controlled |
+| `browser_tabs` | list browser tabs and show which one is controlled |
 | `browser_snapshot` | title, URL, and a numbered inventory of interactive elements |
 | `browser_navigate` | go to a URL in the current tab |
 | `browser_click` | click by snapshot number (single or double) |
@@ -44,55 +47,25 @@ staying silent.
 | `browser_eval` | evaluate JS in the page |
 | `browser_screenshot` | PNG of the viewport, or of a long page as viewport-sized slices |
 | `browser_history` | back / forward / reload |
-| `browser_cookies_export` | save a site's cookies to the vault (current host by default, `all: true` for everything) |
-| `browser_cookies_import` | put a vault back and reload the page |
+| `browser_cookies_import` | restore a vault, or a cookie file exported from a regular browser, and reload |
+| `browser_cookies_export` | save a site's cookies to the vault; needs the debug port |
 | `browser_cookies_vaults` | what is in the vault: files, cookie counts, save times |
 
-Element numbers are written onto the page as a `data-dsh-idx` attribute and stay
-valid until the next `browser_snapshot`.
+## Development
 
-## The cookie vault, and why it exists
-
-The built-in browser lives in a **process-lifetime** session: the shell creates
-each guest in a partition named `dsh-sidebar-browser-<uuid>` (no `persist:`
-prefix), so cookies, logins and localStorage die with the app. That is by design,
-and it cannot be changed from outside.
-
-The vault is a blunt workaround: `browser_cookies_export` pulls cookies over CDP
-into `~/.dsh/cookie-vault/<domain>.json` (mode `600`), and
-`browser_cookies_import` writes them back after a restart and reloads the page.
-The file holds live session tokens — by risk it is a password, so keep it local.
-The directory is configurable through `vaultDir`.
-
-## Measured limitations of the Electron webview
-
-| What | How it behaves |
-|---|---|
-| `captureBeyondViewport` | lies: it repeats the current viewport instead of rendering the page (one infobox in the DOM, three in the image). `full: true` therefore scrolls and captures slices |
-| `Page.reload` on a guest | can take the target down with it; reload is implemented as a navigation to the current URL |
-| Socket closing mid-call | used to hang the call forever; every pending command now rejects with a hint to reopen the tab |
-| SPA scrolling | the window does not move while an inner container scrolls — the tools resolve the target themselves |
-
-## Install and maintenance
-
-In DSH Desktop open Plugins, press Add plugin and paste
-`github:alesha-pro/dsh-sidebar-browser#path:/plugin`. DSH installs the plugin
-and its dependencies. `@deepseek-ai/dsh-tools` and `@deepseek-ai/cordis` are
-peer dependencies and come from the running app.
-
-For development, link a local clone instead. A linked folder resolves imports
-from its own directory, so it needs `node_modules`:
+Link a local clone instead of installing from npm. A linked folder resolves
+imports from its own directory, so it needs `node_modules`:
 
 ```sh
 npm install
 DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 "$DSH" plugin --profile desktop add "$PWD"
 
-# 17 tools, live calls, and the error path, without restarting the app
+# the debug-port path against a live app started with the port
 node selftest.mjs
 ```
 
-Edits to `lib/index.js` are picked up when the app restarts (a profile with HMR
-may pick them up sooner). Full rollback: untick or remove the bundle in the
-Plugins page, or drop `dsh-sidebar-browser-cdp` from `dependencies` and from
-`dsh.profile.bundles` in `~/.dsh/profiles/desktop/package.json`.
+Edits to `lib/` are picked up when the app restarts. Full rollback: uninstall
+the bundle on the Plugins page, or drop `dsh-sidebar-browser-cdp` from
+`dependencies` and from `dsh.profile.bundles` in
+`~/.dsh/profiles/desktop/package.json`.
