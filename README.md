@@ -26,6 +26,8 @@ The Git address works in the same field and always installs the latest commit:
 github:alesha-pro/dsh-sidebar-browser#path:/plugin
 ```
 
+DSH installs through pnpm, and pnpm skips versions published less than a day ago when you give it a bare name. In the first day after a release the bare name therefore installs the previous version. Add the version, as in `dsh-sidebar-browser-cdp@0.3.0`, or use the Git address to get the current one. Version 0.2.0 and older need the app started with a debug port.
+
 Press **Install**, then **Enable now**. DSH downloads the plugin and its dependencies itself. Start a new session and ask the agent to do something in the browser. It opens a tab itself with `browser_open`, or works in a Browser tab you already have open in the right sidebar.
 
 You do not need any launch flag. A plugin installed this way lives in the `desktop` profile and is available in every workspace.
