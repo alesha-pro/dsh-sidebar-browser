@@ -1,20 +1,24 @@
 /**
- * Sidebar Browser CDP — drive DSH Desktop's built-in sidebar browser.
+ * Sidebar Browser — drive DSH Desktop's built-in sidebar browser.
  *
- * The built-in browser tab is an Electron `<webview>` guest. Electron reports it
- * over CDP as `type: "webview"`, which Playwright and Puppeteer both ignore (they
- * only enumerate `page` targets), so a client built on them that attaches to the
- * app's debug port finds only the app shell (`dsh-app://app/`), not the page.
- * This plugin talks raw CDP to the guest's own websocket endpoint, so the agent
- * works in exactly the tab that is visible in the right sidebar.
+ * The built-in browser tab is an Electron `<webview>` guest. Two transports
+ * reach it:
  *
- * Requires DSH Desktop to be started with --remote-debugging-port=<port>.
+ *  - the app window (default). The client half (`lib/client.js`) runs in the
+ *    DSH window and uses the `<webview>` element's own methods. Needs nothing
+ *    but the installed plugin.
+ *  - the debug port. Raw CDP to the guest's own websocket endpoint, for the two
+ *    things the window cannot do: screenshots and the cookie vault (httpOnly
+ *    cookies). Needs the app started with --remote-debugging-port=<port>.
+ *    Playwright and Puppeteer cannot serve here: Electron reports the guest as
+ *    `type: "webview"` and both only enumerate `page` targets.
  *
  * @module dsh-sidebar-browser-cdp
  */
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 
@@ -24,8 +28,10 @@ const name = 'sidebar-browser-cdp'
 /** Services used by the browser tools. */
 const inject = ['tools']
 
-/** Debug port, optional tab selector, and where the cookie vault lives. */
+/** Transport choice, debug port, optional tab selector, and where the cookie vault lives. */
 const Config = z.object({
+  // auto: the app window when it is connected, else the debug port. window / cdp force one.
+  transport: z.string().default('auto'),
   port: z.number().default(9222),
   tab: z.string().default(''),
   vaultDir: z.string().default(''),
@@ -217,36 +223,156 @@ const KEYCODES = {
   ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34, ' ': 32,
 }
 
+/** Routes the client half talks to. The app window reaches them as same-origin requests. */
+const BRIDGE_PREFIX = '/dsh-sidebar-browser'
+
+/**
+ * Command queue between the tools (this process) and the client half that runs
+ * in the app window. The window long-polls for one command, runs it against the
+ * sidebar `<webview>` with the element's own methods, and posts the result back.
+ * Nothing here needs a debug port.
+ */
+function createBridge () {
+  const queue = []
+  const parked = []
+  const inflight = new Map()
+  let lastSeen = 0
+
+  const pump = () => {
+    while (queue.length > 0 && parked.length > 0) {
+      const waiter = parked.shift()
+      if (!waiter.gone) waiter.hand(queue.shift())
+    }
+  }
+
+  return {
+    /** True while a window has polled recently; a closed window ages out. */
+    alive: () => parked.some(waiter => !waiter.gone) || Date.now() - lastSeen < 30000,
+
+    request (op, args = {}, timeoutMs = 30000) {
+      return new Promise((resolve, reject) => {
+        const id = randomUUID()
+        const timer = setTimeout(() => {
+          inflight.delete(id)
+          const at = queue.findIndex(command => command.id === id)
+          if (at >= 0) queue.splice(at, 1)
+          reject(new Error('the DSH window did not answer in time. Is the app window open?'))
+        }, timeoutMs)
+        inflight.set(id, { resolve, reject, timer })
+        queue.push({ id, op, args })
+        pump()
+      })
+    },
+
+    /** Park one long-poll: resolves with a command, or null when the wait runs out. */
+    poll (waitMs = 20000) {
+      lastSeen = Date.now()
+      let waiter
+      const promise = new Promise(resolve => {
+        const timer = setTimeout(() => { waiter.gone = true; resolve(null) }, waitMs)
+        waiter = {
+          gone: false,
+          hand: command => { clearTimeout(timer); waiter.gone = true; resolve(command) },
+        }
+        parked.push(waiter)
+      })
+      pump()
+      return { promise, cancel: () => { waiter.gone = true } }
+    },
+
+    reply ({ id, ok, value, error }) {
+      lastSeen = Date.now()
+      const slot = inflight.get(id)
+      if (!slot) return false
+      inflight.delete(id)
+      clearTimeout(slot.timer)
+      if (ok) slot.resolve(value)
+      else slot.reject(new Error(error || 'the window bridge reported a failure'))
+      return true
+    },
+  }
+}
+
+const readJson = (req, limit = 16 * 1024 * 1024) => new Promise((resolve, reject) => {
+  let size = 0
+  const chunks = []
+  req.on('data', chunk => {
+    size += chunk.length
+    if (size > limit) {
+      reject(new Error('body too large'))
+      req.destroy()
+      return
+    }
+    chunks.push(chunk)
+  })
+  req.on('end', () => {
+    try {
+      resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
+    } catch (error) {
+      reject(error)
+    }
+  })
+  req.on('error', reject)
+})
+
+const sendJson = (res, status, body) => {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(JSON.stringify(body))
+}
+
+/**
+ * Mount the two bridge routes on the host web server.
+ * A JSON POST is required: a web page cannot send one to another origin without
+ * a CORS preflight, which these routes never answer.
+ * @param ctx - context that provides the `webServer` service.
+ * @param bridge - the command queue.
+ */
+function mountBridge (ctx, bridge) {
+  const guard = (req, res) => {
+    if (req.method === 'POST' && String(req.headers['content-type'] ?? '').startsWith('application/json')) return true
+    sendJson(res, 403, { ok: false, error: 'forbidden' })
+    return false
+  }
+  const routes = {
+    poll: async (req, res) => {
+      if (!guard(req, res)) return
+      await readJson(req)
+      const { promise, cancel } = bridge.poll()
+      res.on('close', cancel)
+      const command = await promise
+      if (!res.writableEnded && !res.destroyed) sendJson(res, 200, command ?? { idle: true })
+    },
+    reply: async (req, res) => {
+      if (!guard(req, res)) return
+      sendJson(res, 200, { ok: bridge.reply(await readJson(req)) })
+    },
+  }
+  for (const [name, handler] of Object.entries(routes)) {
+    ctx.effect(
+      () => ctx.webServer.register({ kind: 'exact', path: `${BRIDGE_PREFIX}/${name}`, handler }),
+      `dsh-sidebar-browser: ${name} route`,
+    )
+  }
+}
+
 /**
  * Register the sidebar browser tools.
  * @param ctx - agent-scoped services.
- * @param config - debug port and default tab.
+ * @param config - transport choice, debug port and default tab.
  */
 function apply (ctx, config) {
   const port = config.port
   const defaultTab = config.tab || ''
+  const mode = config.transport || 'auto'
+
+  const bridge = createBridge()
+  if (typeof ctx.inject === 'function') ctx.inject(['webServer'], web => mountBridge(web, bridge))
+  const useBridge = () => mode !== 'cdp' && bridge.alive()
 
   const connect = async (tab) => {
     const want = tab || defaultTab
     const { target, list } = await pickGuest(port, want)
     return { session: await Session.connect(target), target, list }
-  }
-
-  const rectOf = (session, index) => session.eval(`(() => {
-    const el = document.querySelector('[data-dsh-idx="${index}"]')
-    if (!el) return null
-    el.scrollIntoView({ block: 'center', behavior: 'instant' })
-    const r = el.getBoundingClientRect()
-    if (r.width < 1 || r.height < 1) return null
-    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
-             tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || '').trim().slice(0, 60) }
-  })()`)
-
-  const clickRect = async (session, rect, clickCount = 1) => {
-    const base = { x: rect.x, y: rect.y, button: 'left' }
-    await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base, button: 'none' })
-    await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, clickCount })
-    await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, clickCount })
   }
 
   /** One tool call = one fresh connection; the guest may be replaced at any time. */
@@ -257,11 +383,6 @@ function apply (ctx, config) {
     } finally {
       session.close()
     }
-  }
-
-  const textOutput = {
-    schema: { type: 'string' },
-    render: (_args, value) => [{ type: 'text', text: value }],
   }
 
   /**
@@ -276,90 +397,193 @@ function apply (ctx, config) {
     return session.eval('location.href')
   }
 
-  const PORT_NOTE = `Drives the built-in Browser tab of DSH Desktop (the sidebar <webview>). Needs the app started with --remote-debugging-port=${port} and a Browser tab open in the right sidebar (browser_open creates one).`
+  /** The page as seen over the debug port. */
+  const cdpPage = session => ({
+    kind: 'cdp',
+    eval: expression => session.eval(expression),
+    navigate: url => session.send('Page.navigate', { url }),
+    click: async (x, y, clickCount = 1) => {
+      const base = { x, y, button: 'left' }
+      await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base, button: 'none' })
+      await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, clickCount })
+      await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, clickCount })
+    },
+    insertText: text => session.send('Input.insertText', { text }),
+    selectAll: async () => {
+      const selectAll = { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 4 }
+      await session.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...selectAll })
+      await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...selectAll })
+    },
+    key: async key => {
+      const code = KEYCODES[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : undefined)
+      if (code === undefined) throw new Error(`unsupported key: ${key}`)
+      const common = { key, code: key.length === 1 ? `Key${key.toUpperCase()}` : key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code }
+      await session.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common })
+      if (key.length === 1) await session.send('Input.dispatchKeyEvent', { type: 'char', text: key, ...common })
+      await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+    },
+    history: async action => {
+      if (action === 'reload') return reloadPage(session)
+      const history = await session.send('Page.getNavigationHistory')
+      const index = action === 'back' ? history.currentIndex - 1 : history.currentIndex + 1
+      if (index < 0 || index >= history.entries.length) return null
+      await session.send('Page.navigateToHistoryEntry', { entryId: history.entries[index].id })
+      await sleep(1200)
+      return session.eval('location.href')
+    },
+  })
+
+  const NO_TAB = 'no sidebar Browser tab is open. Call browser_open with a URL, or open one by hand in the right sidebar.'
+  const ask = (op, args, timeoutMs) => bridge.request(op, args, timeoutMs).catch(error => {
+    throw new Error(error.message === 'no-guest' ? NO_TAB : error.message)
+  })
+
+  /** The same page, driven from the app window with the `<webview>` element's own methods. */
+  const bridgePage = tab => ({
+    kind: 'window',
+    eval: expression => ask('eval', { code: expression, tab }),
+    navigate: url => ask('navigate', { url, tab }),
+    click: (x, y, count = 1) => ask('click', { x, y, count, tab }),
+    insertText: text => ask('insertText', { text, tab }),
+    selectAll: () => ask('eval', { code: `document.execCommand('selectAll')`, tab }),
+    key: key => ask('key', { key, tab }),
+    history: action => ask('history', { action, tab }),
+  })
+
+  /**
+   * Run a tool body against the current page. The app window is preferred: it
+   * needs nothing but the installed plugin. The debug port is the fallback and
+   * the only transport for the tools that go through `withDebugPort`.
+   */
+  const withPage = async (tab, body) => {
+    if (useBridge()) return body(bridgePage(tab || defaultTab))
+    if (mode === 'window') {
+      throw new Error('the app window has not connected to the plugin yet. Open a DSH Desktop window, or start a new session after installing the plugin.')
+    }
+    return withSession(tab, session => body(cdpPage(session))).catch(error => {
+      if (/cannot reach the DSH debug port/.test(error.message)) {
+        throw new Error('the app window has not connected to the plugin and the debug port is closed. Make sure a DSH Desktop window is open and start a new session; the debug port is only a fallback.')
+      }
+      throw error
+    })
+  }
+
+  const withDebugPort = (what, body) => withSession(undefined, body).catch(error => {
+    if (/cannot reach the DSH debug port/.test(error.message)) {
+      throw new Error(`${what} needs the debug port, the app window cannot do it. ${error.message}`)
+    }
+    throw error
+  })
+
+  const rectOf = (page, index) => page.eval(`(() => {
+    const el = document.querySelector('[data-dsh-idx="${index}"]')
+    if (!el) return null
+    el.scrollIntoView({ block: 'center', behavior: 'instant' })
+    const r = el.getBoundingClientRect()
+    if (r.width < 1 || r.height < 1) return null
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
+             tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || '').trim().slice(0, 60) }
+  })()`)
+
+  const textOutput = {
+    schema: { type: 'string' },
+    render: (_args, value) => [{ type: 'text', text: value }],
+  }
+
+  const NOTE = 'Drives the built-in Browser tab of DSH Desktop (the sidebar <webview>) through the app window. If no Browser tab is open, browser_open creates one.'
+  const PORT_NOTE = `Needs the app started with --remote-debugging-port=${port}: the app window cannot do this one.`
 
   ctx.tools.register(defineTool({
     name: 'browser_tabs',
-    description: `List the built-in browser's sidebar tabs and show which one is controlled. ${PORT_NOTE}`,
+    description: `List the built-in browser's tabs and show which one is controlled. ${NOTE}`,
     parameters: {},
     output: textOutput,
-    execute: () => withSession(undefined, async (session, target) => {
-      const { list } = await pickGuest(port, defaultTab)
-      return [
-        `${list.length} sidebar tab(s); controlling: ${target.title || target.url}`,
-        ...list.map((tab, index) => `  [${index}] ${tab.id.slice(0, 8)}  ${(tab.title || '').slice(0, 50)}  ${tab.url.slice(0, 90)}`),
-      ].join('\n')
-    }),
+    execute: async () => {
+      if (useBridge()) {
+        const tabs = await ask('tabs', {})
+        if (tabs.length === 0) throw new Error(NO_TAB)
+        const current = tabs.find(tab => tab.visible) ?? tabs[0]
+        return [
+          `${tabs.length} browser tab(s), via the app window; controlling: ${current.title || current.url}`,
+          ...tabs.map((tab, index) => `  [${index}] ${tab.visible ? '*' : ' '} ${(tab.title || '').slice(0, 50)}  ${tab.url.slice(0, 90)}`),
+        ].join('\n')
+      }
+      return withSession(undefined, async (session, target) => {
+        const { list } = await pickGuest(port, defaultTab)
+        return [
+          `${list.length} sidebar tab(s), via the debug port; controlling: ${target.title || target.url}`,
+          ...list.map((tab, index) => `  [${index}] ${tab.id.slice(0, 8)}  ${(tab.title || '').slice(0, 50)}  ${tab.url.slice(0, 90)}`),
+        ].join('\n')
+      })
+    },
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_snapshot',
-    description: `Read the built-in browser's page: title, URL, and a numbered inventory of interactive elements. Every other browser tool addresses elements by these numbers. ${PORT_NOTE}`,
-    parameters: { tab: { type: 'string', description: 'Tab id or URL fragment; omit for the current tab.' } },
+    description: `Read the built-in browser's page: title, URL, and a numbered inventory of interactive elements. Every other browser tool addresses elements by these numbers. ${NOTE}`,
+    parameters: { tab: { type: 'string', description: 'URL or title fragment of the tab; omit for the current tab.' } },
     output: textOutput,
-    execute: args => withSession(args.tab, session => session.eval(SNAPSHOT_JS).then(renderSnapshot)),
+    execute: args => withPage(args.tab, page => page.eval(SNAPSHOT_JS).then(renderSnapshot)),
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_navigate',
-    description: `Navigate the built-in browser's tab to a URL. ${PORT_NOTE}`,
+    description: `Navigate the built-in browser's tab to a URL. ${NOTE}`,
     parameters: { url: { type: 'string', required: true, description: 'Absolute URL, or a host that becomes https://.' } },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
+    execute: args => withPage(undefined, async page => {
       const url = /^[a-z]+:\/\//i.test(args.url) ? args.url : `https://${args.url}`
-      await session.send('Page.navigate', { url })
+      await page.navigate(url)
       for (let i = 0; i < 60; i++) {
         await sleep(200)
-        const state = await session.eval('document.readyState')
+        const state = await page.eval('document.readyState').catch(() => 'loading')
         if (state === 'complete' && i > 1) break
       }
-      return `${await session.eval('location.href')}\n${await session.eval('document.title')}`
+      return `${await page.eval('location.href')}\n${await page.eval('document.title')}`
     }),
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_click',
-    description: `Click an element in the built-in browser by its snapshot number. ${PORT_NOTE}`,
+    description: `Click an element in the built-in browser by its snapshot number. ${NOTE}`,
     parameters: {
       index: { type: 'integer', required: true, description: 'Element number from browser_snapshot.' },
       double: { type: 'boolean', description: 'Double click instead of a single click.' },
     },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
-      const rect = await rectOf(session, args.index)
+    execute: args => withPage(undefined, async page => {
+      const rect = await rectOf(page, args.index)
       if (!rect) throw new Error(`element [${args.index}] is no longer on the page — run browser_snapshot again`)
       await sleep(60)
-      await clickRect(session, rect, args.double ? 2 : 1)
+      await page.click(rect.x, rect.y, args.double ? 2 : 1)
       await sleep(700)
-      const after = await session.eval(SNAPSHOT_JS)
+      const after = await page.eval(SNAPSHOT_JS)
       return `clicked [${args.index}] <${rect.tag}> "${rect.text}"\nnow: ${after.url}\n${renderSnapshot(after)}`
     }),
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_type',
-    description: `Type text into the built-in browser, optionally focusing an element first. React/Vue compatible. ${PORT_NOTE}`,
+    description: `Type text into the built-in browser, optionally focusing an element first. React/Vue compatible. ${NOTE}`,
     parameters: {
       text: { type: 'string', required: true, description: 'Text to insert.' },
       index: { type: 'integer', description: 'Element number to focus before typing; omit to type into the focused element.' },
       replace: { type: 'boolean', description: 'Select all first, so the typed text replaces the existing value.' },
     },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
+    execute: args => withPage(undefined, async page => {
       if (args.index !== undefined) {
-        const rect = await rectOf(session, args.index)
+        const rect = await rectOf(page, args.index)
         if (!rect) throw new Error(`element [${args.index}] is no longer on the page — run browser_snapshot again`)
         await sleep(60)
-        await clickRect(session, rect)
+        await page.click(rect.x, rect.y)
         await sleep(120)
       }
       if (args.replace) {
-        const selectAll = { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 4 }
-        await session.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...selectAll })
-        await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...selectAll })
+        await page.selectAll()
         await sleep(40)
       }
-      await session.send('Input.insertText', { text: args.text })
+      await page.insertText(args.text)
       await sleep(150)
       return `typed ${args.text.length} char(s) into ${args.index !== undefined ? `element [${args.index}]` : 'the focused element'}`
     }),
@@ -367,36 +591,31 @@ function apply (ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'browser_press',
-    description: `Send one key press to the built-in browser (Enter, Tab, Escape, arrows, or a single character). ${PORT_NOTE}`,
+    description: `Send one key press to the built-in browser (Enter, Tab, Escape, arrows, or a single character). ${NOTE}`,
     parameters: { key: { type: 'string', required: true, description: 'Key name, e.g. Enter, Tab, Escape, ArrowDown; a single character types itself.' } },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
-      const { key } = args
-      const code = KEYCODES[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : undefined)
-      if (code === undefined) throw new Error(`unsupported key: ${key}`)
-      const common = { key, code: key.length === 1 ? `Key${key.toUpperCase()}` : key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code }
-      await session.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common })
-      if (key.length === 1) await session.send('Input.dispatchKeyEvent', { type: 'char', text: key, ...common })
-      await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+    execute: args => withPage(undefined, async page => {
+      if (KEYCODES[args.key] === undefined && args.key.length !== 1) throw new Error(`unsupported key: ${args.key}`)
+      await page.key(args.key)
       await sleep(200)
-      return `pressed ${key}`
+      return `pressed ${args.key}`
     }),
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_scroll',
-    description: `Scroll the built-in browser's page. ${PORT_NOTE}`,
+    description: `Scroll the built-in browser's page. ${NOTE}`,
     parameters: {
       direction: { type: 'string', required: true, description: 'up, down, top or bottom.' },
       amount: { type: 'integer', description: 'Pixels for up/down; defaults to 600.' },
     },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
-      const before = await session.eval(SCROLL_INFO_JS)
+    execute: args => withPage(undefined, async page => {
+      const before = await page.eval(SCROLL_INFO_JS)
       // Sites that scroll an inner container are the common case (SPA
       // shells); window.scrollY stays 0 there, so the target is resolved first
       // and the report names whichever element actually moved.
-      const moved = await session.eval(`(() => {
+      const moved = await page.eval(`(() => {
         const doc = document.documentElement
         const wantWindow = doc.scrollHeight > window.innerHeight + 50
         const boxes = [...document.querySelectorAll('div,main,section')]
@@ -419,18 +638,18 @@ function apply (ctx, config) {
       })()`)
       if (moved === 'none') throw new Error('the page has nothing to scroll')
       await sleep(400)
-      const after = await session.eval(SCROLL_INFO_JS)
+      const after = await page.eval(SCROLL_INFO_JS)
       return `${args.direction}: ${describeScroll(before)} -> ${describeScroll(after)}`
     }),
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_text',
-    description: `Read the visible text of the built-in browser's page. ${PORT_NOTE}`,
+    description: `Read the visible text of the built-in browser's page. ${NOTE}`,
     parameters: { max: { type: 'integer', description: 'Maximum characters to return; defaults to 4000.' } },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
-      const text = await session.eval('document.body ? document.body.innerText.replace(/\\n{3,}/g, "\\n\\n") : ""')
+    execute: args => withPage(undefined, async page => {
+      const text = await page.eval('document.body ? document.body.innerText.replace(/\\n{3,}/g, "\\n\\n") : ""')
       const max = args.max ?? 4000
       return text.length > max ? `${text.slice(0, max)}\n… (${text.length - max} more chars)` : text
     }),
@@ -438,14 +657,14 @@ function apply (ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'browser_html',
-    description: `Return the outer HTML of one element of the built-in browser's page, by snapshot number. ${PORT_NOTE}`,
+    description: `Return the outer HTML of one element of the built-in browser's page, by snapshot number. ${NOTE}`,
     parameters: {
       index: { type: 'integer', required: true, description: 'Element number from browser_snapshot.' },
       max: { type: 'integer', description: 'Maximum characters to return; defaults to 1200.' },
     },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
-      const html = await session.eval(`(() => { const el = document.querySelector('[data-dsh-idx="${args.index}"]'); return el ? el.outerHTML : null })()`)
+    execute: args => withPage(undefined, async page => {
+      const html = await page.eval(`(() => { const el = document.querySelector('[data-dsh-idx="${args.index}"]'); return el ? el.outerHTML : null })()`)
       if (!html) throw new Error(`element [${args.index}] not found — run browser_snapshot again`)
       const max = args.max ?? 1200
       return html.length > max ? `${html.slice(0, max)}\n… (${html.length - max} more chars)` : html
@@ -454,10 +673,10 @@ function apply (ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'browser_eval',
-    description: `Evaluate a JavaScript expression in the built-in browser's page and return its value. Keep it read-only unless the user asked for a change. ${PORT_NOTE}`,
+    description: `Evaluate a JavaScript expression in the built-in browser's page and return its value. Keep it read-only unless the user asked for a change. ${NOTE}`,
     parameters: { expression: { type: 'string', required: true, description: 'Expression evaluated in the page context.' } },
     output: textOutput,
-    execute: args => withSession(undefined, async session => JSON.stringify(await session.eval(args.expression), null, 2)),
+    execute: args => withPage(undefined, async page => JSON.stringify(await page.eval(args.expression), null, 2)),
   }))
 
   ctx.tools.register(defineTool({
@@ -468,7 +687,7 @@ function apply (ctx, config) {
       savePath: { type: 'string', description: 'Target PNG path; defaults to a temp file. With full, slices get -01, -02… suffixes.' },
     },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
+    execute: args => withDebugPort('a screenshot', async session => {
       const requested = args.savePath ?? join(tmpdir(), 'dsh-sidebar-browser', `shot-${Date.now()}.png`)
       const base = requested.replace(/\.png$/i, '')
       mkdirSync(join(requested, '..'), { recursive: true })
@@ -505,20 +724,14 @@ function apply (ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'browser_history',
-    description: `Move the built-in browser back, forward, or reload its page. ${PORT_NOTE}`,
+    description: `Move the built-in browser back, forward, or reload its page. ${NOTE}`,
     parameters: { action: { type: 'string', required: true, description: 'back, forward or reload.' } },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
-      if (args.action === 'reload') {
-        return `reloaded: ${await reloadPage(session)}`
-      }
-      if (args.action !== 'back' && args.action !== 'forward') throw new Error(`unsupported action: ${args.action}`)
-      const history = await session.send('Page.getNavigationHistory')
-      const index = args.action === 'back' ? history.currentIndex - 1 : history.currentIndex + 1
-      if (index < 0 || index >= history.entries.length) return `nothing to go ${args.action} to`
-      await session.send('Page.navigateToHistoryEntry', { entryId: history.entries[index].id })
-      await sleep(1200)
-      return `${args.action}: ${await session.eval('location.href')}`
+    execute: args => withPage(undefined, async page => {
+      if (!['back', 'forward', 'reload'].includes(args.action)) throw new Error(`unsupported action: ${args.action}`)
+      const landed = await page.history(args.action)
+      if (landed === null) return `nothing to go ${args.action} to`
+      return `${args.action === 'reload' ? 'reloaded' : args.action}: ${landed}`
     }),
   }))
 
@@ -544,7 +757,7 @@ function apply (ctx, config) {
       all: { type: 'boolean', description: 'Save every cookie in the tab into all.json instead of just the current site.' },
     },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
+    execute: args => withDebugPort('the cookie vault', async session => {
       await session.send('Network.enable')
       const all = (await session.send('Network.getAllCookies')).cookies ?? []
       const page = await session.eval('location.href')
@@ -580,7 +793,7 @@ function apply (ctx, config) {
       file: { type: 'string', description: 'Explicit vault file path instead of a domain name.' },
     },
     output: textOutput,
-    execute: args => withSession(undefined, async session => {
+    execute: args => withDebugPort('the cookie vault', async session => {
       const current = await session.eval('location.href')
       let host = ''
       try { host = new URL(current).hostname } catch {}
@@ -671,9 +884,9 @@ function apply (ctx, config) {
   }))
 
   /**
-   * Opening and closing tabs is the one job the guest cannot do for itself: the
-   * shell owns the sidebar and creates guests lazily. These two tools therefore
-   * attach to the app window (`dsh-app://`) and press the same controls a person
+   * Debug-port fallback for opening and closing tabs, used only when the app
+   * window is not connected. The shell owns the sidebar and creates guests
+   * lazily, so these helpers attach to the app window (`dsh-app://`) and press the same controls a person
    * would, located by the shell's own `data-*` hooks rather than by label text,
    * so they do not depend on the UI language. Measured on DSH Desktop 0.2.0-rc.2.
    */
@@ -713,63 +926,79 @@ function apply (ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'browser_open',
-    description: `Open a new Browser tab in DSH Desktop's right sidebar, expanding the sidebar if it is collapsed, and optionally load a URL in it. Use this when no Browser tab is open or when a separate tab is wanted; use browser_navigate to change the page of the current tab. This is the only way to create a tab: the page tools cannot. Needs the app started with --remote-debugging-port=${port}.`,
+    description: `Open a new Browser tab in DSH Desktop's right sidebar, expanding the sidebar if it is collapsed, and optionally load a URL in it. Use this when no Browser tab is open or when a separate tab is wanted; use browser_navigate to change the page of the current tab. This is the only way to create a tab: the page tools cannot.`,
     parameters: { url: { type: 'string', description: 'Address to load, absolute or a bare host. Omit to open an empty tab.' } },
     output: textOutput,
-    execute: args => withShell(async session => {
-      const before = guests(await listTargets(port)).map(t => t.id)
-      const click = sel => shellEval(session, `const e = one(${JSON.stringify(sel)}); if (e) e.click(); return Boolean(e)`)
-      if (await click('[data-sidebar-right-expand]')) await sleep(600)
-      // The Browser card lives on the sidebar's start page; "new tab" brings that page up.
-      if (!await shellEval(session, `return Boolean(one('[data-sidebar-right-guide-entry="browser"]'))`)) {
-        if (!await click('[data-dockkit-add-tab]')) throw new Error('could not find the new-tab button in the right sidebar')
-        await sleep(600)
+    execute: async args => {
+      const url = args.url ? (/^[a-z]+:\/\//i.test(args.url) ? args.url : `https://${args.url}`) : undefined
+      if (useBridge()) {
+        const result = await ask('open', { url }, 20000)
+        return `${url ? `opened ${result.opened}` : 'opened an empty Browser tab'}\n${renderTabs(result.tabs)}`
       }
-      if (!await click('[data-sidebar-right-guide-entry="browser"]')) {
-        throw new Error('the Browser entry is missing from the sidebar start page; is the built-in browser enabled?')
-      }
-      await sleep(700)
-      if (!args.url) return `opened an empty Browser tab\n${renderTabs(await sidebarTabs(session))}`
+      return withShell(async session => {
+        const before = guests(await listTargets(port)).map(t => t.id)
+        const click = sel => shellEval(session, `const e = one(${JSON.stringify(sel)}); if (e) e.click(); return Boolean(e)`)
+        if (await click('[data-sidebar-right-expand]')) await sleep(600)
+        // The Browser card lives on the sidebar's start page; "new tab" brings that page up.
+        if (!await shellEval(session, `return Boolean(one('[data-sidebar-right-guide-entry="browser"]'))`)) {
+          if (!await click('[data-dockkit-add-tab]')) throw new Error('could not find the new-tab button in the right sidebar')
+          await sleep(600)
+        }
+        if (!await click('[data-sidebar-right-guide-entry="browser"]')) {
+          throw new Error('the Browser entry is missing from the sidebar start page; is the built-in browser enabled?')
+        }
+        await sleep(700)
+        if (!url) return `opened an empty Browser tab\n${renderTabs(await sidebarTabs(session))}`
 
-      const url = /^[a-z]+:\/\//i.test(args.url) ? args.url : `https://${args.url}`
-      const focused = await shellEval(session, 'const input = address(); if (!input) return false; input.focus(); input.select(); return true')
-      if (!focused) throw new Error('opened a Browser tab but could not find its address field')
-      await session.send('Input.insertText', { text: url })
-      const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r' }
-      await session.send('Input.dispatchKeyEvent', { type: 'keyDown', ...enter })
-      await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...enter })
-      for (let i = 0; i < 40; i++) {
-        await sleep(250)
-        const fresh = guests(await listTargets(port)).find(t => !before.includes(t.id))
-        if (fresh) return `opened ${fresh.url}\n${renderTabs(await sidebarTabs(session))}`
-      }
-      throw new Error(`the tab opened but no page appeared for ${url} within 10 s`)
-    }),
+        const focused = await shellEval(session, 'const input = address(); if (!input) return false; input.focus(); input.select(); return true')
+        if (!focused) throw new Error('opened a Browser tab but could not find its address field')
+        await session.send('Input.insertText', { text: url })
+        const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r' }
+        await session.send('Input.dispatchKeyEvent', { type: 'keyDown', ...enter })
+        await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...enter })
+        for (let i = 0; i < 40; i++) {
+          await sleep(250)
+          const fresh = guests(await listTargets(port)).find(t => !before.includes(t.id))
+          if (fresh) return `opened ${fresh.url}\n${renderTabs(await sidebarTabs(session))}`
+        }
+        throw new Error(`the tab opened but no page appeared for ${url} within 10 s`)
+      })
+    },
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_close',
-    description: `Close a tab in DSH Desktop's right sidebar, or collapse the sidebar. With no arguments it closes the active tab. Sidebar tabs can also be files or terminals, so pass a title fragment when the active tab may not be the browser. Collapsing keeps the tabs. Needs the app started with --remote-debugging-port=${port}.`,
+    description: `Close a tab in DSH Desktop's right sidebar, or collapse the sidebar. With no arguments it closes the active tab. Sidebar tabs can also be files or terminals, so pass a title fragment when the active tab may not be the browser. Collapsing keeps the tabs.`,
     parameters: {
       tab: { type: 'string', description: 'Fragment of the tab title to close; omit for the active tab.' },
       sidebar: { type: 'boolean', description: 'Collapse the right sidebar instead of closing a tab.' },
     },
     output: textOutput,
-    execute: args => withShell(async session => {
-      if (args.sidebar) {
-        const done = await shellEval(session, `const e = one('[data-sidebar-right-toggle]'); if (e) e.click(); return Boolean(e)`)
-        return done ? 'collapsed the right sidebar; its tabs are kept' : 'the right sidebar is already collapsed'
+    execute: async args => {
+      if (useBridge()) {
+        const result = await ask('close', { tab: args.tab, sidebar: Boolean(args.sidebar) })
+        if (args.sidebar) return result.collapsed ? 'collapsed the right sidebar; its tabs are kept' : 'the right sidebar is already collapsed'
+        if (result.closed === null) {
+          return args.tab ? `no sidebar tab matches "${args.tab}"\n${renderTabs(result.tabs)}` : 'no sidebar tab is open (the sidebar may be collapsed)'
+        }
+        return `closed "${result.closed}"\n${renderTabs(result.tabs)}`
       }
-      const list = await sidebarTabs(session)
-      if (list.length === 0) return 'no sidebar tab is open (the sidebar may be collapsed)'
-      const want = String(args.tab ?? '').toLowerCase()
-      const hit = want ? list.find(tab => tab.title.toLowerCase().includes(want)) : list.find(tab => tab.active)
-      if (!hit) return `no sidebar tab matches "${args.tab}"\n${renderTabs(list)}`
-      const closed = await shellEval(session, `const e = document.querySelector('[data-dockkit-tab-close="${hit.id}"]'); if (e) e.click(); return Boolean(e)`)
-      if (!closed) throw new Error(`could not find the close button of "${hit.title}"`)
-      await sleep(500)
-      return `closed "${hit.title}"\n${renderTabs(await sidebarTabs(session))}`
-    }),
+      return withShell(async session => {
+        if (args.sidebar) {
+          const done = await shellEval(session, `const e = one('[data-sidebar-right-toggle]'); if (e) e.click(); return Boolean(e)`)
+          return done ? 'collapsed the right sidebar; its tabs are kept' : 'the right sidebar is already collapsed'
+        }
+        const list = await sidebarTabs(session)
+        if (list.length === 0) return 'no sidebar tab is open (the sidebar may be collapsed)'
+        const want = String(args.tab ?? '').toLowerCase()
+        const hit = want ? list.find(tab => tab.title.toLowerCase().includes(want)) : list.find(tab => tab.active)
+        if (!hit) return `no sidebar tab matches "${args.tab}"\n${renderTabs(list)}`
+        const closed = await shellEval(session, `const e = document.querySelector('[data-dockkit-tab-close="${hit.id}"]'); if (e) e.click(); return Boolean(e)`)
+        if (!closed) throw new Error(`could not find the close button of "${hit.title}"`)
+        await sleep(500)
+        return `closed "${hit.title}"\n${renderTabs(await sidebarTabs(session))}`
+      })
+    },
   }))
 }
 

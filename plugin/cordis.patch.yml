@@ -7,6 +7,10 @@
     - id: sidebar-browser-cdp
       name: 'dsh-sidebar-browser-cdp'
       config:
+        # auto: the app window when it is connected, else the debug port.
+        # window or cdp force one transport.
+        transport: auto
+        # Only screenshots and the cookie vault need the port.
         # Must match the port the desktop app is started with:
         #   open -a "DeepSeek Harness" --args --remote-debugging-port=9222
         port: 9222

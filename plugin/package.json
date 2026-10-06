@@ -1,12 +1,15 @@
 {
   "name": "dsh-sidebar-browser-cdp",
-  "version": "0.2.0",
-  "description": "Drive DSH Desktop's built-in sidebar browser (Electron <webview>) over raw CDP",
+  "version": "0.3.0",
+  "description": "Let the agent use DSH Desktop's built-in sidebar browser",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": {
       "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
     },
     "./package.json": "./package.json"
   },
@@ -18,6 +21,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "keywords": [
