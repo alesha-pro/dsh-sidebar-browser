@@ -65,7 +65,8 @@ window.__ModuleLoader__.load({
       } catch (error) {
         const probe = `(async () => { try { await (0, eval)(${JSON.stringify(code)}); return null } catch (e) { return String(e && (e.stack || e.message) || e) } })()`
         const detail = await guest.executeJavaScript(probe).catch(() => null)
-        throw new Error(detail || String(error && error.message || error))
+        // An EvalError here is the page's CSP refusing the probe, not the script's own failure.
+        throw new Error(detail && !/^EvalError/.test(detail) ? detail : 'the script threw in the page; its message is not available because this page forbids eval')
       }
     }
 

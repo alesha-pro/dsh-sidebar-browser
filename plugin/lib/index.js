@@ -188,14 +188,16 @@ function describeScroll (scroll) {
 /**
  * Expression that moves whichever element actually scrolls this page, and
  * reports where it landed. The container is tagged by SCROLL_INFO_JS first.
+ * The jump is forced to be instant: a page with `scroll-behavior: smooth`
+ * (GitHub) would still read its old position right after the call.
  */
 const scrollTo = offset => `(() => {
   const box = document.querySelector('[data-dsh-scroll]')
   if (box) {
-    box.scrollTop = ${Number(offset)}
+    box.scrollTo({ top: ${Number(offset)}, behavior: 'instant' })
     return { kind: 'container', top: Math.round(box.scrollTop), height: box.scrollHeight, client: box.clientHeight }
   }
-  window.scrollTo(0, ${Number(offset)})
+  window.scrollTo({ top: ${Number(offset)}, behavior: 'instant' })
   const doc = document.documentElement
   return { kind: 'window', top: Math.round(window.scrollY), height: doc.scrollHeight, client: window.innerHeight }
 })()`
@@ -221,6 +223,134 @@ function renderSnapshot (snap) {
 const KEYCODES = {
   Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40,
   ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34, ' ': 32,
+}
+
+/**
+ * In-page renderer, for screenshots without the debug port. The app window
+ * cannot capture the page (`capturePage()` crashes it on DSH Desktop
+ * 0.2.0-rc.2), so the page draws itself: modern-screenshot clones the DOM into
+ * an SVG foreignObject and paints that on a canvas. The result uses the
+ * browser's own layout and fonts but is not a pixel copy: canvas, video,
+ * iframes and images served without CORS can come out blank.
+ */
+let shotLibrary
+const shotLibrarySource = () => (shotLibrary ??= readFileSync(new URL('./vendor/modern-screenshot.js', import.meta.url), 'utf8'))
+
+/** Load the library into the page once, hidden from any AMD or CommonJS loader the page has. */
+const installShotJs = () => '(() => { if (window.__dshShot) return true; (function () { var define, module, exports; '
+  + shotLibrarySource()
+  + '\n}).call(globalThis); window.__dshShot = globalThis.modernScreenshot; return Boolean(window.__dshShot) })()'
+
+/**
+ * Render the current viewport to a PNG data URL. Blocks that are fully off
+ * screen are kept as empty boxes: cloning them is the slow part, and removing
+ * them would shift the layout. Ancestors of fixed or sticky boxes are never
+ * emptied, and a box is measured with its overflow because a `height: 100%`
+ * wrapper is shorter than what it holds.
+ */
+const RENDER_SHOT_JS = `(async () => {
+  const vh = innerHeight, vw = innerWidth, pad = 200
+  const hollow = new WeakSet(), pinned = new WeakSet()
+  for (const el of document.querySelectorAll('*')) {
+    const position = getComputedStyle(el).position
+    if (position === 'fixed' || position === 'sticky') for (let node = el; node; node = node.parentElement) pinned.add(node)
+  }
+  const filter = node => {
+    const parent = node.parentElement
+    if (parent && hollow.has(parent)) return false
+    if (node.nodeType === 1 && !pinned.has(node)) {
+      const r = node.getBoundingClientRect()
+      if (r.width > 0 || r.height > 0) {
+        const bottom = r.top + Math.max(r.height, node.scrollHeight)
+        const right = r.left + Math.max(r.width, node.scrollWidth)
+        if (bottom < -pad || r.top > vh + pad || right < -pad || r.left > vw + pad) {
+          const display = getComputedStyle(node).display
+          if (!display.startsWith('inline') && display !== 'contents' && !display.startsWith('table-')) hollow.add(node)
+        }
+      }
+    }
+    return true
+  }
+  return window.__dshShot.domToPng(document.documentElement, {
+    width: vw,
+    height: vh,
+    scale: Math.min(2, devicePixelRatio || 1),
+    filter,
+    backgroundColor: getComputedStyle(document.documentElement).backgroundColor === 'rgba(0, 0, 0, 0)' ? '#ffffff' : null,
+    style: { transform: 'translate(' + (-scrollX) + 'px,' + (-scrollY) + 'px)' },
+    timeout: 1500,
+  })
+})()`
+
+/**
+ * Cookies from any of three shapes, as the vault's own records: a vault written
+ * by browser_cookies_export, a JSON array exported from a regular browser
+ * (Cookie-Editor / EditThisCookie), or a Netscape cookies.txt.
+ * @param text - file contents.
+ * @returns cookies with name, value, domain, path, secure, httpOnly, sameSite, expires.
+ */
+function parseCookieFile (text) {
+  const trimmed = text.trim()
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    const parsed = JSON.parse(trimmed)
+    const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.cookies) ? parsed.cookies : [])
+    const sameSite = value => ({ strict: 'Strict', lax: 'Lax', none: 'None', no_restriction: 'None' })[String(value ?? '').toLowerCase()]
+    return {
+      domain: Array.isArray(parsed) ? null : (parsed.domain ?? null),
+      cookies: list.filter(cookie => cookie && cookie.name).map(cookie => ({
+        name: cookie.name,
+        value: String(cookie.value ?? ''),
+        // A browser export marks host-only cookies with a flag; the vault marks domain cookies with a leading dot.
+        domain: cookie.hostOnly === false && !String(cookie.domain).startsWith('.') ? `.${cookie.domain}` : String(cookie.domain ?? ''),
+        path: cookie.path || '/',
+        secure: Boolean(cookie.secure),
+        httpOnly: Boolean(cookie.httpOnly),
+        sameSite: sameSite(cookie.sameSite),
+        expires: typeof cookie.expires === 'number' ? cookie.expires : (typeof cookie.expirationDate === 'number' ? cookie.expirationDate : -1),
+        session: cookie.session ?? !(cookie.expires > 0 || cookie.expirationDate > 0),
+      })),
+    }
+  }
+  const cookies = []
+  for (const raw of trimmed.split(/\r?\n/)) {
+    const httpOnly = raw.startsWith('#HttpOnly_')
+    const line = httpOnly ? raw.slice('#HttpOnly_'.length) : raw
+    if (!line || line.startsWith('#')) continue
+    const [domain, subdomains, path, secure, expires, name, value = ''] = line.split('\t')
+    if (!name) continue
+    cookies.push({
+      name,
+      value,
+      domain: subdomains === 'TRUE' && !domain.startsWith('.') ? `.${domain}` : domain,
+      path: path || '/',
+      secure: secure === 'TRUE',
+      httpOnly,
+      sameSite: undefined,
+      expires: Number(expires) > 0 ? Number(expires) : -1,
+      session: !(Number(expires) > 0),
+    })
+  }
+  return { domain: null, cookies }
+}
+
+/**
+ * The `document.cookie` line that recreates a cookie from page script. HttpOnly
+ * cannot be set this way; the server does not see that attribute, so a login
+ * still restores, but the cookie becomes readable by the page's own scripts.
+ * @param cookie - a vault record.
+ * @param host - host of the page that will set it.
+ * @returns the line, or null when this page cannot set the cookie.
+ */
+function cookieLine (cookie, host) {
+  const domain = String(cookie.domain).replace(/^\./, '')
+  const hostOnly = !String(cookie.domain).startsWith('.') || cookie.name.startsWith('__Host-')
+  if (hostOnly ? domain !== host : !(host === domain || host.endsWith(`.${domain}`))) return null
+  const parts = [`${cookie.name}=${cookie.value}`, `Path=${cookie.name.startsWith('__Host-') ? '/' : (cookie.path || '/')}`]
+  if (!hostOnly) parts.push(`Domain=${domain}`)
+  if (cookie.secure || /^__(Secure|Host)-/.test(cookie.name) || cookie.sameSite === 'None') parts.push('Secure')
+  if (cookie.sameSite) parts.push(`SameSite=${cookie.sameSite}`)
+  if (!cookie.session && cookie.expires > 0) parts.push(`Expires=${new Date(cookie.expires * 1000).toUTCString()}`)
+  return parts.join('; ')
 }
 
 /** Routes the client half talks to. The app window reaches them as same-origin requests. */
@@ -468,12 +598,7 @@ function apply (ctx, config) {
     })
   }
 
-  const withDebugPort = (what, body) => withSession(undefined, body).catch(error => {
-    if (/cannot reach the DSH debug port/.test(error.message)) {
-      throw new Error(`${what} needs the debug port, the app window cannot do it. ${error.message}`)
-    }
-    throw error
-  })
+  const portOpen = () => listTargets(port).then(() => true, () => false)
 
   const rectOf = (page, index) => page.eval(`(() => {
     const el = document.querySelector('[data-dsh-idx="${index}"]')
@@ -491,7 +616,7 @@ function apply (ctx, config) {
   }
 
   const NOTE = 'Drives the built-in Browser tab of DSH Desktop (the sidebar <webview>) through the app window. If no Browser tab is open, browser_open creates one.'
-  const PORT_NOTE = `Needs the app started with --remote-debugging-port=${port}: the app window cannot do this one.`
+  const PORT_NOTE = `Needs the app started with --remote-debugging-port=${port}: HttpOnly cookies cannot be read from the app window.`
 
   ctx.tools.register(defineTool({
     name: 'browser_tabs',
@@ -625,14 +750,15 @@ function apply (ctx, config) {
         if (!wantWindow && !box) return 'none'
         const target = wantWindow ? null : box
         if (target) target.setAttribute('data-dsh-scroll', '1')
+        const scroller = target ?? window
         const amount = ${Math.abs(Number(args.amount ?? 600))}
         if ('${args.direction}' === 'top') {
-          if (target) target.scrollTop = 0; else window.scrollTo(0, 0)
+          scroller.scrollTo({ top: 0, behavior: 'instant' })
         } else if ('${args.direction}' === 'bottom') {
-          if (target) target.scrollTop = target.scrollHeight; else window.scrollTo(0, doc.scrollHeight)
+          scroller.scrollTo({ top: target ? target.scrollHeight : doc.scrollHeight, behavior: 'instant' })
         } else {
           const delta = '${args.direction}' === 'up' ? -amount : amount
-          if (target) target.scrollBy(0, delta); else window.scrollBy(0, delta)
+          scroller.scrollBy({ top: delta, behavior: 'instant' })
         }
         return target ? 'container' : 'window'
       })()`)
@@ -679,47 +805,83 @@ function apply (ctx, config) {
     execute: args => withPage(undefined, async page => JSON.stringify(await page.eval(args.expression), null, 2)),
   }))
 
+  /**
+   * Capture over the debug port. A window that is fully covered does not paint,
+   * and `Page.captureScreenshot` then never answers, so the wait is bounded.
+   */
+  const portShot = session => Promise.race([
+    session.send('Page.captureScreenshot', { format: 'png' }).then(shot => Buffer.from(shot.data, 'base64')),
+    sleep(6000).then(() => { throw new Error('not-painting') }),
+  ])
+
+  const pageShot = async page => {
+    await page.eval(`Boolean(window.__dshShot)`).then(ready => ready || page.eval(installShotJs()))
+    const data = await page.eval(RENDER_SHOT_JS)
+    if (typeof data !== 'string' || !data.startsWith('data:image/png;base64,')) throw new Error('the page could not render itself to an image')
+    return Buffer.from(data.slice(data.indexOf(',') + 1), 'base64')
+  }
+
   ctx.tools.register(defineTool({
     name: 'browser_screenshot',
-    description: `Screenshot the built-in browser's page to PNG and return the path(s). Use full=true for a long page: it is captured as viewport-sized slices, because Electron's single-shot full-page capture (captureBeyondViewport) repeats the viewport instead of rendering the whole page — measured on DSH Desktop 0.2.0-rc.2. ${PORT_NOTE}`,
+    description: `Screenshot the built-in browser's page to PNG and return the path(s). Use full=true for a long page: it comes back as viewport-sized slices. Without the debug port the page is rendered in-page from its DOM: layout, text and fonts are the browser's own, but canvas, video, iframes and some cross-origin images can be blank, so use browser_snapshot or browser_text when exact content matters. With the app started with --remote-debugging-port=${port} it is a pixel capture. ${NOTE}`,
     parameters: {
       full: { type: 'boolean', description: 'Capture the whole page as numbered slice files instead of only the viewport.' },
       savePath: { type: 'string', description: 'Target PNG path; defaults to a temp file. With full, slices get -01, -02… suffixes.' },
     },
     output: textOutput,
-    execute: args => withDebugPort('a screenshot', async session => {
+    execute: async args => {
       const requested = args.savePath ?? join(tmpdir(), 'dsh-sidebar-browser', `shot-${Date.now()}.png`)
       const base = requested.replace(/\.png$/i, '')
       mkdirSync(join(requested, '..'), { recursive: true })
 
-      const grab = async file => {
-        const shot = await session.send('Page.captureScreenshot', { format: 'png' })
-        writeFileSync(file, Buffer.from(shot.data, 'base64'))
-        return file
+      /** Viewport or slices, with whatever `shoot` captures one viewport. */
+      const capture = async (page, shoot) => {
+        const grab = async file => {
+          writeFileSync(file, await shoot())
+          return file
+        }
+        if (!args.full) return grab(requested)
+
+        const start = await page.eval(SCROLL_INFO_JS)
+        if (start.kind === 'none') return grab(requested)
+        const step = Math.max(200, start.client - 40)
+        const files = []
+        let previousTop = -1
+
+        for (let offset = 0, index = 1; offset < start.height && index <= 40; offset += step, index++) {
+          const position = await page.eval(scrollTo(offset))
+          const atEnd = position.top + position.client >= position.height - 2
+          // A target that refuses to move would otherwise yield identical slices.
+          if (index > 1 && position.top === previousTop) break
+          previousTop = position.top
+          await sleep(350)
+          files.push(await grab(`${base}-${String(index).padStart(2, '0')}.png`))
+          if (atEnd) break
+        }
+
+        await page.eval(scrollTo(start.top))
+        return `${start.kind} ${start.height}px, viewport ${start.client}px -> ${files.length} slice(s):\n${files.join('\n')}`
       }
 
-      if (!args.full) return grab(requested)
+      const inPage = () => withPage(undefined, async page => {
+        if (page.kind !== 'window') throw new Error('not-window')
+        return `${await capture(page, () => pageShot(page))}\n(rendered in-page from the DOM, not a pixel capture)`
+      })
 
-      const start = await session.eval(SCROLL_INFO_JS)
-      if (start.kind === 'none') return grab(requested)
-      const step = Math.max(200, start.client - 40)
-      const files = []
-      let previousTop = -1
-
-      for (let offset = 0, index = 1; offset < start.height && index <= 40; offset += step, index++) {
-        const position = await session.eval(scrollTo(offset))
-        const atEnd = position.top + position.client >= position.height - 2
-        // A target that refuses to move would otherwise yield identical slices.
-        if (index > 1 && position.top === previousTop) break
-        previousTop = position.top
-        await sleep(350)
-        files.push(await grab(`${base}-${String(index).padStart(2, '0')}.png`))
-        if (atEnd) break
+      if (mode !== 'window' && await portOpen()) {
+        try {
+          return await withSession(undefined, session => capture(cdpPage(session), () => portShot(session)))
+        } catch (error) {
+          // Covered window: fall through to the in-page render when the app window is connected.
+          if (error.message !== 'not-painting') throw error
+          if (!useBridge()) throw new Error('the DSH window is covered and does not paint, so the capture never finished. Bring the window to the front and retry.')
+        }
       }
-
-      await session.eval(scrollTo(start.top))
-      return `${start.kind} ${start.height}px, viewport ${start.client}px -> ${files.length} slice(s):\n${files.join('\n')}`
-    }),
+      if (!useBridge()) {
+        throw new Error(`a screenshot needs the app window connected to the plugin, or the app started with --remote-debugging-port=${port}. Neither is available.`)
+      }
+      return inPage()
+    },
   }))
 
   ctx.tools.register(defineTool({
@@ -751,13 +913,13 @@ function apply (ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'browser_cookies_export',
-    description: `Save the built-in browser's cookies into a local vault file so a login survives an app restart — the sidebar browser keeps no storage between runs. Run it while you are logged in, before quitting. The file holds live session tokens: treat it like a password. ${PORT_NOTE}`,
+    description: `Save the built-in browser's cookies into a local vault file so a login survives an app restart — the sidebar browser keeps no storage between runs. Run it while you are logged in, before quitting. The file holds live session tokens: treat it like a password. ${PORT_NOTE} Restoring with browser_cookies_import does not need the port.`,
     parameters: {
       domain: { type: 'string', description: 'Site to save, e.g. example.com (subdomains included). Defaults to the current page host.' },
       all: { type: 'boolean', description: 'Save every cookie in the tab into all.json instead of just the current site.' },
     },
     output: textOutput,
-    execute: args => withDebugPort('the cookie vault', async session => {
+    execute: args => withSession(undefined, async session => {
       await session.send('Network.enable')
       const all = (await session.send('Network.getAllCookies')).cookies ?? []
       const page = await session.eval('location.href')
@@ -782,87 +944,121 @@ function apply (ctx, config) {
       const hosts = [...new Set(wanted.map(cookie => cookie.domain))].slice(0, 8).join(', ')
       const ephemeral = wanted.filter(cookie => cookie.session).length
       return `${wanted.length} cookie(s) -> ${file}\nhosts: ${hosts}\nsession cookies: ${ephemeral} · persistent: ${wanted.length - ephemeral}`
+    }).catch(error => {
+      if (!/cannot reach the DSH debug port/.test(error.message)) throw error
+      throw new Error(
+        'saving a login needs the debug port: session cookies are HttpOnly and no page script can read them. Two ways to get a vault: '
+        + `start the app once with --remote-debugging-port=${port}, log in and export; or export the site's cookies from your regular browser `
+        + `(Cookie-Editor JSON or cookies.txt) into ${vaultDir()}/<site>.json. Restoring a vault with browser_cookies_import does not need the port.`,
+      )
     }),
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_cookies_import',
-    description: `Restore cookies saved by browser_cookies_export into the built-in browser and reload, so a login comes back after an app restart. Navigates to the site first when the tab is elsewhere. ${PORT_NOTE}`,
+    description: `Restore cookies into the built-in browser and reload, so a login comes back after an app restart. Reads a vault saved by browser_cookies_export, or a cookie file exported from a regular browser (Cookie-Editor JSON, cookies.txt). Navigates to the site first when the tab is elsewhere. Works without the debug port. ${NOTE}`,
     parameters: {
       domain: { type: 'string', description: 'Vault to restore, e.g. example.com. Defaults to the current page host.' },
-      file: { type: 'string', description: 'Explicit vault file path instead of a domain name.' },
+      file: { type: 'string', description: 'Explicit cookie file path instead of a domain name.' },
     },
     output: textOutput,
-    execute: args => withDebugPort('the cookie vault', async session => {
-      const current = await session.eval('location.href')
-      let host = ''
-      try { host = new URL(current).hostname } catch {}
-      // An explicit file wins; otherwise the site's own vault, falling back to a
-      // catch-all `all.json` written by `browser_cookies_export({ all: true })`.
-      let file = args.file ?? vaultFile(args.domain ?? host)
-      if (!args.file && !existsSync(file) && !args.domain) {
-        const fallback = vaultFile('all')
-        if (existsSync(fallback)) file = fallback
-      }
-      if (!existsSync(file)) {
-        throw new Error(`no vault at ${file} — run browser_cookies_export while logged in first`
-          + (args.domain ? '' : `, or export with all: true into ${vaultFile('all')}`))
-      }
-      const vault = JSON.parse(readFileSync(file, 'utf8'))
-      const cookies = Array.isArray(vault.cookies) ? vault.cookies : []
-      if (cookies.length === 0) throw new Error(`${file} holds no cookies`)
+    execute: async args => {
+      const viaPort = mode !== 'window' && await portOpen()
+      const run = body => viaPort ? withSession(undefined, session => body(cdpPage(session), session)) : withPage(undefined, page => body(page))
 
-      await session.send('Network.enable')
-      // Being on the site is the reliable way to have the browser accept its own
-      // cookies; a cross-site Network.setCookie is rejected often enough to matter.
-      const alreadyThere = cookies.some(cookie => host && belongsToSite(cookie.domain, host))
-      if (!alreadyThere) {
-        // Prefer the site the vault was saved from; otherwise the shortest cookie
-        // domain in it (`.example.com` outranks `auth.example.com`).
-        const shortest = cookies.reduce((best, cookie) => {
-          const domain = String(cookie.domain).replace(/^\./, '')
-          return !best || domain.length < best.length ? domain : best
-        }, '')
-        const destination = args.domain ?? vault.domain ?? host ?? shortest
-        if (destination) {
-          await session.send('Page.navigate', { url: `https://${destination}/` })
-          await sleep(1500)
+      return run(async (page, session) => {
+        const current = await page.eval('location.href')
+        let host = ''
+        try { host = new URL(current).hostname } catch {}
+        // An explicit file wins; otherwise the site's own vault, falling back to a
+        // catch-all `all.json` written by `browser_cookies_export({ all: true })`.
+        let file = args.file ?? vaultFile(args.domain ?? host)
+        if (!args.file && !existsSync(file) && !args.domain) {
+          const fallback = vaultFile('all')
+          if (existsSync(fallback)) file = fallback
         }
-      }
+        if (!existsSync(file)) {
+          throw new Error(`no vault at ${file} — run browser_cookies_export while logged in first`
+            + (args.domain ? '' : `, or export with all: true into ${vaultFile('all')}`))
+        }
+        const vault = parseCookieFile(readFileSync(file, 'utf8'))
+        const cookies = vault.cookies
+        if (cookies.length === 0) throw new Error(`${file} holds no cookies`)
 
-      let restored = 0
-      const failed = []
-      for (const cookie of cookies) {
-        const params = {
-          name: cookie.name,
-          value: cookie.value,
-          domain: cookie.domain,
-          path: cookie.path || '/',
-          secure: Boolean(cookie.secure),
-          httpOnly: Boolean(cookie.httpOnly),
+        // Being on the site is the reliable way to have the browser accept its own
+        // cookies, and the only way for a page script to set them at all.
+        const alreadyThere = cookies.some(cookie => host && belongsToSite(cookie.domain, host))
+        if (!alreadyThere) {
+          // Prefer the site the vault was saved from; otherwise the shortest cookie
+          // domain in it (`.example.com` outranks `auth.example.com`).
+          const shortest = cookies.reduce((best, cookie) => {
+            const domain = String(cookie.domain).replace(/^\./, '')
+            return !best || domain.length < best.length ? domain : best
+          }, '')
+          const destination = args.domain ?? vault.domain ?? shortest
+          if (destination) {
+            await page.navigate(`https://${destination}/`)
+            await sleep(2000)
+            try { host = new URL(await page.eval('location.href')).hostname } catch {}
+          }
         }
-        if (cookie.sameSite && cookie.sameSite !== 'Unspecified') params.sameSite = cookie.sameSite
-        if (!cookie.session && typeof cookie.expires === 'number' && cookie.expires > 0) params.expires = cookie.expires
-        try {
-          const result = await session.send('Network.setCookie', params)
-          if (result.success) restored++
-          else failed.push(cookie.name)
-        } catch (error) {
-          failed.push(`${cookie.name} (${error.message.split('\n')[0].slice(0, 40)})`)
-        }
-      }
 
-      await reloadPage(session)
-      await sleep(800)
-      const title = await session.eval('document.title')
-      const tail = failed.length ? `\nrejected: ${failed.slice(0, 8).join(', ')}` : ''
-      return `restored ${restored}/${cookies.length} cookie(s) from ${file}\nnow: ${await session.eval('location.href')}\ntitle: ${title}${tail}`
-    }),
+        let restored = 0
+        const failed = []
+        if (session) {
+          await session.send('Network.enable')
+          for (const cookie of cookies) {
+            const params = {
+              name: cookie.name,
+              value: cookie.value,
+              domain: cookie.domain,
+              path: cookie.path || '/',
+              secure: Boolean(cookie.secure),
+              httpOnly: Boolean(cookie.httpOnly),
+            }
+            if (cookie.sameSite && cookie.sameSite !== 'Unspecified') params.sameSite = cookie.sameSite
+            if (!cookie.session && typeof cookie.expires === 'number' && cookie.expires > 0) params.expires = cookie.expires
+            try {
+              const result = await session.send('Network.setCookie', params)
+              if (result.success) restored++
+              else failed.push(cookie.name)
+            } catch (error) {
+              failed.push(`${cookie.name} (${error.message.split('\n')[0].slice(0, 40)})`)
+            }
+          }
+        } else {
+          // No debug port: the page sets the cookies itself. A cookie for another
+          // host cannot be set from here and is reported instead.
+          const lines = []
+          for (const cookie of cookies) {
+            const line = cookieLine(cookie, host)
+            if (line) lines.push([cookie.name, line])
+            else failed.push(`${cookie.name} (belongs to ${cookie.domain})`)
+          }
+          const rejected = await page.eval(`(() => {
+            const rejected = []
+            for (const [name, line] of ${JSON.stringify(lines)}) {
+              try { document.cookie = line } catch (error) { rejected.push(name) }
+            }
+            return rejected
+          })()`)
+          restored = lines.length - rejected.length
+          failed.push(...rejected)
+        }
+
+        await page.history('reload')
+        await sleep(800)
+        const title = await page.eval('document.title')
+        const tail = failed.length ? `\nnot restored: ${failed.slice(0, 8).join(', ')}` : ''
+        const how = session ? '' : '\n(set from the page: these cookies are no longer HttpOnly in this tab)'
+        return `restored ${restored}/${cookies.length} cookie(s) from ${file}\nnow: ${await page.eval('location.href')}\ntitle: ${title}${tail}${how}`
+      })
+    },
   }))
 
   ctx.tools.register(defineTool({
     name: 'browser_cookies_vaults',
-    description: `List the saved cookie vaults on disk, with size and save time. ${PORT_NOTE}`,
+    description: `List the saved cookie vaults on disk, with size and save time.`,
     parameters: {},
     output: textOutput,
     execute: async () => {
