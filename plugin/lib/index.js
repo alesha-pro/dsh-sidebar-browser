@@ -70,7 +70,7 @@ async function pickGuest (port, want) {
   const list = guests(all)
   if (list.length === 0) {
     throw new Error(
-      'no sidebar Browser tab is open. Call browser_open with a URL, or open one by hand in the right sidebar — '
+      'no sidebar Browser tab is open. Call internal_browser_open with a URL, or open one by hand in the right sidebar — '
       + 'the guest is created lazily, so the port alone is not enough.',
     )
   }
@@ -284,7 +284,7 @@ const RENDER_SHOT_JS = `(async () => {
 
 /**
  * Cookies from any of three shapes, as the vault's own records: a vault written
- * by browser_cookies_export, a JSON array exported from a regular browser
+ * by internal_browser_cookies_export, a JSON array exported from a regular browser
  * (Cookie-Editor / EditThisCookie), or a Netscape cookies.txt.
  * @param text - file contents.
  * @returns cookies with name, value, domain, path, secure, httpOnly, sameSite, expires.
@@ -563,7 +563,7 @@ function apply (ctx, config) {
     },
   })
 
-  const NO_TAB = 'no sidebar Browser tab is open. Call browser_open with a URL, or open one by hand in the right sidebar.'
+  const NO_TAB = 'no sidebar Browser tab is open. Call internal_browser_open with a URL, or open one by hand in the right sidebar.'
   const ask = (op, args, timeoutMs) => bridge.request(op, args, timeoutMs).catch(error => {
     throw new Error(error.message === 'no-guest' ? NO_TAB : error.message)
   })
@@ -615,11 +615,11 @@ function apply (ctx, config) {
     render: (_args, value) => [{ type: 'text', text: value }],
   }
 
-  const NOTE = 'Drives the built-in Browser tab of DSH Desktop (the sidebar <webview>) through the app window. If no Browser tab is open, browser_open creates one.'
+  const NOTE = 'Drives the built-in Browser tab of DSH Desktop (the sidebar <webview>) through the app window. If no Browser tab is open, internal_browser_open creates one.'
   const PORT_NOTE = `Needs the app started with --remote-debugging-port=${port}: HttpOnly cookies cannot be read from the app window.`
 
   ctx.tools.register(defineTool({
-    name: 'browser_tabs',
+    name: 'internal_browser_tabs',
     description: `List the built-in browser's tabs and show which one is controlled. ${NOTE}`,
     parameters: {},
     output: textOutput,
@@ -644,7 +644,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_snapshot',
+    name: 'internal_browser_snapshot',
     description: `Read the built-in browser's page: title, URL, and a numbered inventory of interactive elements. Every other browser tool addresses elements by these numbers. ${NOTE}`,
     parameters: { tab: { type: 'string', description: 'URL or title fragment of the tab; omit for the current tab.' } },
     output: textOutput,
@@ -652,7 +652,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_navigate',
+    name: 'internal_browser_navigate',
     description: `Navigate the built-in browser's tab to a URL. ${NOTE}`,
     parameters: { url: { type: 'string', required: true, description: 'Absolute URL, or a host that becomes https://.' } },
     output: textOutput,
@@ -669,16 +669,16 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_click',
+    name: 'internal_browser_click',
     description: `Click an element in the built-in browser by its snapshot number. ${NOTE}`,
     parameters: {
-      index: { type: 'integer', required: true, description: 'Element number from browser_snapshot.' },
+      index: { type: 'integer', required: true, description: 'Element number from internal_browser_snapshot.' },
       double: { type: 'boolean', description: 'Double click instead of a single click.' },
     },
     output: textOutput,
     execute: args => withPage(undefined, async page => {
       const rect = await rectOf(page, args.index)
-      if (!rect) throw new Error(`element [${args.index}] is no longer on the page — run browser_snapshot again`)
+      if (!rect) throw new Error(`element [${args.index}] is no longer on the page — run internal_browser_snapshot again`)
       await sleep(60)
       await page.click(rect.x, rect.y, args.double ? 2 : 1)
       await sleep(700)
@@ -688,7 +688,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_type',
+    name: 'internal_browser_type',
     description: `Type text into the built-in browser, optionally focusing an element first. React/Vue compatible. ${NOTE}`,
     parameters: {
       text: { type: 'string', required: true, description: 'Text to insert.' },
@@ -699,7 +699,7 @@ function apply (ctx, config) {
     execute: args => withPage(undefined, async page => {
       if (args.index !== undefined) {
         const rect = await rectOf(page, args.index)
-        if (!rect) throw new Error(`element [${args.index}] is no longer on the page — run browser_snapshot again`)
+        if (!rect) throw new Error(`element [${args.index}] is no longer on the page — run internal_browser_snapshot again`)
         await sleep(60)
         await page.click(rect.x, rect.y)
         await sleep(120)
@@ -715,7 +715,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_press',
+    name: 'internal_browser_press',
     description: `Send one key press to the built-in browser (Enter, Tab, Escape, arrows, or a single character). ${NOTE}`,
     parameters: { key: { type: 'string', required: true, description: 'Key name, e.g. Enter, Tab, Escape, ArrowDown; a single character types itself.' } },
     output: textOutput,
@@ -728,7 +728,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_scroll',
+    name: 'internal_browser_scroll',
     description: `Scroll the built-in browser's page. ${NOTE}`,
     parameters: {
       direction: { type: 'string', required: true, description: 'up, down, top or bottom.' },
@@ -770,7 +770,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_text',
+    name: 'internal_browser_text',
     description: `Read the visible text of the built-in browser's page. ${NOTE}`,
     parameters: { max: { type: 'integer', description: 'Maximum characters to return; defaults to 4000.' } },
     output: textOutput,
@@ -782,23 +782,23 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_html',
+    name: 'internal_browser_html',
     description: `Return the outer HTML of one element of the built-in browser's page, by snapshot number. ${NOTE}`,
     parameters: {
-      index: { type: 'integer', required: true, description: 'Element number from browser_snapshot.' },
+      index: { type: 'integer', required: true, description: 'Element number from internal_browser_snapshot.' },
       max: { type: 'integer', description: 'Maximum characters to return; defaults to 1200.' },
     },
     output: textOutput,
     execute: args => withPage(undefined, async page => {
       const html = await page.eval(`(() => { const el = document.querySelector('[data-dsh-idx="${args.index}"]'); return el ? el.outerHTML : null })()`)
-      if (!html) throw new Error(`element [${args.index}] not found — run browser_snapshot again`)
+      if (!html) throw new Error(`element [${args.index}] not found — run internal_browser_snapshot again`)
       const max = args.max ?? 1200
       return html.length > max ? `${html.slice(0, max)}\n… (${html.length - max} more chars)` : html
     }),
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_eval',
+    name: 'internal_browser_eval',
     description: `Evaluate a JavaScript expression in the built-in browser's page and return its value. Keep it read-only unless the user asked for a change. ${NOTE}`,
     parameters: { expression: { type: 'string', required: true, description: 'Expression evaluated in the page context.' } },
     output: textOutput,
@@ -822,8 +822,8 @@ function apply (ctx, config) {
   }
 
   ctx.tools.register(defineTool({
-    name: 'browser_screenshot',
-    description: `Screenshot the built-in browser's page to PNG and return the path(s). Use full=true for a long page: it comes back as viewport-sized slices. Without the debug port the page is rendered in-page from its DOM: layout, text and fonts are the browser's own, but canvas, video, iframes and some cross-origin images can be blank, so use browser_snapshot or browser_text when exact content matters. With the app started with --remote-debugging-port=${port} it is a pixel capture. ${NOTE}`,
+    name: 'internal_browser_screenshot',
+    description: `Screenshot the built-in browser's page to PNG and return the path(s). Use full=true for a long page: it comes back as viewport-sized slices. Without the debug port the page is rendered in-page from its DOM: layout, text and fonts are the browser's own, but canvas, video, iframes and some cross-origin images can be blank, so use internal_browser_snapshot or internal_browser_text when exact content matters. With the app started with --remote-debugging-port=${port} it is a pixel capture. ${NOTE}`,
     parameters: {
       full: { type: 'boolean', description: 'Capture the whole page as numbered slice files instead of only the viewport.' },
       savePath: { type: 'string', description: 'Target PNG path; defaults to a temp file. With full, slices get -01, -02… suffixes.' },
@@ -885,7 +885,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_history',
+    name: 'internal_browser_history',
     description: `Move the built-in browser back, forward, or reload its page. ${NOTE}`,
     parameters: { action: { type: 'string', required: true, description: 'back, forward or reload.' } },
     output: textOutput,
@@ -912,8 +912,8 @@ function apply (ctx, config) {
   }
 
   ctx.tools.register(defineTool({
-    name: 'browser_cookies_export',
-    description: `Save the built-in browser's cookies into a local vault file so a login survives an app restart — the sidebar browser keeps no storage between runs. Run it while you are logged in, before quitting. The file holds live session tokens: treat it like a password. ${PORT_NOTE} Restoring with browser_cookies_import does not need the port.`,
+    name: 'internal_browser_cookies_export',
+    description: `Save the built-in browser's cookies into a local vault file so a login survives an app restart — the sidebar browser keeps no storage between runs. Run it while you are logged in, before quitting. The file holds live session tokens: treat it like a password. ${PORT_NOTE} Restoring with internal_browser_cookies_import does not need the port.`,
     parameters: {
       domain: { type: 'string', description: 'Site to save, e.g. example.com (subdomains included). Defaults to the current page host.' },
       all: { type: 'boolean', description: 'Save every cookie in the tab into all.json instead of just the current site.' },
@@ -949,14 +949,14 @@ function apply (ctx, config) {
       throw new Error(
         'saving a login needs the debug port: session cookies are HttpOnly and no page script can read them. Two ways to get a vault: '
         + `start the app once with --remote-debugging-port=${port}, log in and export; or export the site's cookies from your regular browser `
-        + `(Cookie-Editor JSON or cookies.txt) into ${vaultDir()}/<site>.json. Restoring a vault with browser_cookies_import does not need the port.`,
+        + `(Cookie-Editor JSON or cookies.txt) into ${vaultDir()}/<site>.json. Restoring a vault with internal_browser_cookies_import does not need the port.`,
       )
     }),
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_cookies_import',
-    description: `Restore cookies into the built-in browser and reload, so a login comes back after an app restart. Reads a vault saved by browser_cookies_export, or a cookie file exported from a regular browser (Cookie-Editor JSON, cookies.txt). Navigates to the site first when the tab is elsewhere. Works without the debug port. ${NOTE}`,
+    name: 'internal_browser_cookies_import',
+    description: `Restore cookies into the built-in browser and reload, so a login comes back after an app restart. Reads a vault saved by internal_browser_cookies_export, or a cookie file exported from a regular browser (Cookie-Editor JSON, cookies.txt). Navigates to the site first when the tab is elsewhere. Works without the debug port. ${NOTE}`,
     parameters: {
       domain: { type: 'string', description: 'Vault to restore, e.g. example.com. Defaults to the current page host.' },
       file: { type: 'string', description: 'Explicit cookie file path instead of a domain name.' },
@@ -971,14 +971,14 @@ function apply (ctx, config) {
         let host = ''
         try { host = new URL(current).hostname } catch {}
         // An explicit file wins; otherwise the site's own vault, falling back to a
-        // catch-all `all.json` written by `browser_cookies_export({ all: true })`.
+        // catch-all `all.json` written by `internal_browser_cookies_export({ all: true })`.
         let file = args.file ?? vaultFile(args.domain ?? host)
         if (!args.file && !existsSync(file) && !args.domain) {
           const fallback = vaultFile('all')
           if (existsSync(fallback)) file = fallback
         }
         if (!existsSync(file)) {
-          throw new Error(`no vault at ${file} — run browser_cookies_export while logged in first`
+          throw new Error(`no vault at ${file} — run internal_browser_cookies_export while logged in first`
             + (args.domain ? '' : `, or export with all: true into ${vaultFile('all')}`))
         }
         const vault = parseCookieFile(readFileSync(file, 'utf8'))
@@ -1057,13 +1057,13 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_cookies_vaults',
+    name: 'internal_browser_cookies_vaults',
     description: `List the saved cookie vaults on disk, with size and save time.`,
     parameters: {},
     output: textOutput,
     execute: async () => {
       const dir = vaultDir()
-      if (!existsSync(dir)) return `no vault yet at ${dir} — run browser_cookies_export while logged in`
+      if (!existsSync(dir)) return `no vault yet at ${dir} — run internal_browser_cookies_export while logged in`
       const entries = readdirSync(dir).filter(file => file.endsWith('.json'))
       if (entries.length === 0) return `${dir} is empty`
       const lines = entries.map(file => {
@@ -1121,8 +1121,8 @@ function apply (ctx, config) {
     : list.map(tab => `  ${tab.active ? '*' : ' '} ${tab.title.slice(0, 70)}`).join('\n')
 
   ctx.tools.register(defineTool({
-    name: 'browser_open',
-    description: `Open a new Browser tab in DSH Desktop's right sidebar, expanding the sidebar if it is collapsed, and optionally load a URL in it. Use this when no Browser tab is open or when a separate tab is wanted; use browser_navigate to change the page of the current tab. This is the only way to create a tab: the page tools cannot.`,
+    name: 'internal_browser_open',
+    description: `Open a new Browser tab in DSH Desktop's right sidebar, expanding the sidebar if it is collapsed, and optionally load a URL in it. Use this when no Browser tab is open or when a separate tab is wanted; use internal_browser_navigate to change the page of the current tab. This is the only way to create a tab: the page tools cannot.`,
     parameters: { url: { type: 'string', description: 'Address to load, absolute or a bare host. Omit to open an empty tab.' } },
     output: textOutput,
     execute: async args => {
@@ -1163,7 +1163,7 @@ function apply (ctx, config) {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'browser_close',
+    name: 'internal_browser_close',
     description: `Close a tab in DSH Desktop's right sidebar, or collapse the sidebar. With no arguments it closes the active tab. Sidebar tabs can also be files or terminals, so pass a title fragment when the active tab may not be the browser. Collapsing keeps the tabs.`,
     parameters: {
       tab: { type: 'string', description: 'Fragment of the tab title to close; omit for the active tab.' },

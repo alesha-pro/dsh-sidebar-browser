@@ -2,7 +2,7 @@
 
 **English** · [Русский](README.ru.md)
 
-A plugin for DSH Desktop (DeepSeek Harness) that lets the model use the built-in browser. It adds 17 `browser_*` tools that open and close tabs in the right sidebar and read, click, type, scroll and screenshot the page in them. It is the same Browser tab you are looking at, and it works with the app started the normal way.
+A plugin for DSH Desktop (DeepSeek Harness) that lets the model use the built-in browser. It adds 17 `internal_browser_*` tools that open and close tabs in the right sidebar and read, click, type, scroll and screenshot the page in them. It is the same Browser tab you are looking at, and it works with the app started the normal way.
 
 <p align="center">
   <img src="docs/demo.gif" alt="DeepSeek V4.1 Flash in DSH Desktop opens Wikipedia in the sidebar browser, finds the RTX 3090 article and highlights the 24 GB cell" width="800">
@@ -28,7 +28,7 @@ github:alesha-pro/dsh-sidebar-browser#path:/plugin
 
 DSH installs through pnpm, and pnpm skips versions published less than a day ago when you give it a bare name. In the first day after a release the bare name therefore installs the previous version. Add the version, as in `dsh-sidebar-browser-cdp@0.3.0`, or use the Git address to get the current one. Version 0.2.0 and older need the app started with a debug port.
 
-Press **Install**, then **Enable now**. DSH downloads the plugin and its dependencies itself. Start a new session and ask the agent to do something in the browser. It opens a tab itself with `browser_open`, or works in a Browser tab you already have open in the right sidebar.
+Press **Install**, then **Enable now**. DSH downloads the plugin and its dependencies itself. Start a new session and ask the agent to do something in the browser. It opens a tab itself with `internal_browser_open`, or works in a Browser tab you already have open in the right sidebar.
 
 You do not need any launch flag. A plugin installed this way lives in the `desktop` profile and is available in every workspace.
 
@@ -56,32 +56,32 @@ npm install
 
 * DSH Desktop 0.2.0-rc.2. I measured everything here on that build (Electron 44, Chrome 152) on macOS. Windows and Linux are untested.
 * An open DSH Desktop window. The plugin has a half that runs in the window, and the tools talk to the page through it.
-* The page tools need a Browser tab that has loaded a URL. The shell creates the webview lazily, so `browser_open` or a tab opened by hand has to come first.
+* The page tools need a Browser tab that has loaded a URL. The shell creates the webview lazily, so `internal_browser_open` or a tab opened by hand has to come first.
 * The debug port is optional and serves 2 things described below. Start the app with `open -a "DeepSeek Harness" --args --remote-debugging-port=9222` when you want them.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `browser_open` | opens a new Browser tab, expands the sidebar if it is collapsed, and loads a URL |
-| `browser_close` | closes a sidebar tab by title or the active one, or collapses the sidebar |
-| `browser_tabs` | lists browser tabs and shows which one is controlled |
-| `browser_snapshot` | title, URL and a numbered list of interactive elements |
-| `browser_navigate` | opens a URL in the current tab |
-| `browser_click` | clicks an element by its snapshot number, single or double |
-| `browser_type` | types into an element; works with React and Vue inputs, `replace` clears the field first |
-| `browser_press` | sends one key: Enter, Tab, Escape, arrows or a character |
-| `browser_scroll` | up, down, top or bottom, on whichever element scrolls the page |
-| `browser_text` | visible page text |
-| `browser_html` | outerHTML of an element by number |
-| `browser_eval` | evaluates JavaScript in the page |
-| `browser_screenshot` | PNG of the viewport, or a long page as viewport-sized slices |
-| `browser_history` | back, forward, reload |
-| `browser_cookies_import` | restores a saved login after a restart |
-| `browser_cookies_export` | saves a site's cookies into a local vault; this one needs the debug port |
-| `browser_cookies_vaults` | lists saved vaults |
+| `internal_browser_open` | opens a new Browser tab, expands the sidebar if it is collapsed, and loads a URL |
+| `internal_browser_close` | closes a sidebar tab by title or the active one, or collapses the sidebar |
+| `internal_browser_tabs` | lists browser tabs and shows which one is controlled |
+| `internal_browser_snapshot` | title, URL and a numbered list of interactive elements |
+| `internal_browser_navigate` | opens a URL in the current tab |
+| `internal_browser_click` | clicks an element by its snapshot number, single or double |
+| `internal_browser_type` | types into an element; works with React and Vue inputs, `replace` clears the field first |
+| `internal_browser_press` | sends one key: Enter, Tab, Escape, arrows or a character |
+| `internal_browser_scroll` | up, down, top or bottom, on whichever element scrolls the page |
+| `internal_browser_text` | visible page text |
+| `internal_browser_html` | outerHTML of an element by number |
+| `internal_browser_eval` | evaluates JavaScript in the page |
+| `internal_browser_screenshot` | PNG of the viewport, or a long page as viewport-sized slices |
+| `internal_browser_history` | back, forward, reload |
+| `internal_browser_cookies_import` | restores a saved login after a restart |
+| `internal_browser_cookies_export` | saves a site's cookies into a local vault; this one needs the debug port |
+| `internal_browser_cookies_vaults` | lists saved vaults |
 
-Element numbers come from the last `browser_snapshot`. The snapshot writes them onto the page as a `data-dsh-idx` attribute, and they stay valid until the next snapshot.
+Element numbers come from the last `internal_browser_snapshot`. The snapshot writes them onto the page as a `data-dsh-idx` attribute, and they stay valid until the next snapshot.
 
 ## Transports
 
@@ -96,20 +96,20 @@ In the window the client half uses what the app already exposes:
 * the sidebar service (`sidebarRight.openTab`, `close`, `toggleExpanded`) to open and close tabs;
 * the `<webview>` element's own methods (`executeJavaScript`, `sendInputEvent`, `insertText`, `loadURL`, `goBack`) for everything on the page. Clicks and key presses sent this way arrive as trusted events.
 
-`browser_tabs` tells you which path a call took: `via the app window` or `via the debug port`.
+`internal_browser_tabs` tells you which path a call took: `via the app window` or `via the debug port`.
 
 ### Screenshots without a debug port
 
 The `<webview>` element has a `capturePage()` method, and calling it from the window crashes the window's renderer process on this build. So without the port the page draws itself. The plugin loads [modern-screenshot](https://github.com/qq15725/modern-screenshot) (MIT, vendored in `plugin/lib/vendor/`) into the page, which clones the DOM into an SVG `foreignObject` and paints it on a canvas. Layout, text and fonts are the browser's own, and on Wikipedia, GitHub and Hugging Face I could not tell the result from a pixel capture at a glance.
 
-It is still a re-render and not a capture. Canvas, video, iframes and images served without CORS can come out blank, and the tool says `rendered in-page from the DOM` in its output. One viewport takes a few seconds. When the app runs with the debug port, `browser_screenshot` takes a pixel capture instead.
+It is still a re-render and not a capture. Canvas, video, iframes and images served without CORS can come out blank, and the tool says `rendered in-page from the DOM` in its output. One viewport takes a few seconds. When the app runs with the debug port, `internal_browser_screenshot` takes a pixel capture instead.
 
 ### Debug port
 
 Start the app with `--remote-debugging-port=9222` and the plugin can also talk raw CDP to the webview. That path is needed for 1 thing and improves another:
 
-* `browser_cookies_export` needs it. A login lives in `HttpOnly` cookies, and no page script can read those.
-* `browser_screenshot` becomes a pixel capture.
+* `internal_browser_cookies_export` needs it. A login lives in `HttpOnly` cookies, and no page script can read those.
+* `internal_browser_screenshot` becomes a pixel capture.
 
 Playwright and Puppeteer cannot serve as that CDP client. Electron reports the sidebar webview as a target of type `webview`, both libraries list only targets of type `page`, and the only page they find is the harness UI:
 
@@ -168,13 +168,13 @@ The same session denies every permission request, blocks downloads, and allows o
 The cookie vault works around the lost logins. A vault is a file in `~/.dsh/cookie-vault/`, and restoring one needs no debug port:
 
 ```
-browser_cookies_import { domain: "example.com" }
+internal_browser_cookies_import { domain: "example.com" }
 ```
 
 There are 2 ways to get the file:
 
-* Export it from DSH. Start the app once with the debug port, log in, and call `browser_cookies_export {}`. This is the only step in the plugin that needs the port.
-* Export the site's cookies from your regular browser, as Cookie-Editor JSON or a Netscape `cookies.txt`, and save the file as `~/.dsh/cookie-vault/<site>.json`. `browser_cookies_import` reads those formats too.
+* Export it from DSH. Start the app once with the debug port, log in, and call `internal_browser_cookies_export {}`. This is the only step in the plugin that needs the port.
+* Export the site's cookies from your regular browser, as Cookie-Editor JSON or a Netscape `cookies.txt`, and save the file as `~/.dsh/cookie-vault/<site>.json`. `internal_browser_cookies_import` reads those formats too.
 
 Without the port the page sets the cookies itself through `document.cookie`. A script cannot set the `HttpOnly` attribute, and the server never sees that attribute, so the login still comes back. In my test the server received a `__Secure-` and a `__Host-` cookie restored this way. The price is that the restored cookies are readable by the site's own scripts in that tab. With the port open the import sets real `HttpOnly` cookies.
 
@@ -206,7 +206,7 @@ Vault files are written with mode `600` into a `700` directory. They hold live s
 * In the default mode the plugin opens no port. It adds 2 routes to the web server DSH already runs for its own window, `/dsh-sidebar-browser/poll` and `/dsh-sidebar-browser/reply`. They accept only JSON `POST` requests, which a web page cannot send cross-origin without a preflight. I did not audit how DSH itself protects that server.
 * The debug port, if you use it, listens on loopback. While it is open, any local process can attach to the entire app, including the harness UI. Start the app with the flag when you need it, and start it normally the rest of the time.
 * Host code from a plugin runs in-process, outside the workspace sandbox. Read `plugin/lib/index.js` and `plugin/lib/client.js` before you install it.
-* `browser_eval` runs arbitrary JavaScript in the page, and the cookie tools handle session tokens. Use them on sites where you would accept the agent acting as you.
+* `internal_browser_eval` runs arbitrary JavaScript in the page, and the cookie tools handle session tokens. Use them on sites where you would accept the agent acting as you.
 * The plugin does not unpack `app.asar` and does not touch the app's code signature. It changes two things on your machine: a bundle entry in `~/.dsh/profiles/desktop/package.json` and, if you use it, `~/.dsh/cookie-vault/`.
 
 ## Uninstall

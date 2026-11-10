@@ -2,7 +2,7 @@
   "name": "dsh-sidebar-browser",
   "version": "0.2.0",
   "private": true,
-  "description": "Drive DSH Desktop's built-in sidebar browser: a plugin with browser_* tools plus a standalone raw-CDP CLI",
+  "description": "Drive DSH Desktop's built-in sidebar browser: a plugin with internal_browser_* tools plus a standalone raw-CDP CLI",
   "type": "module",
   "license": "MIT",
   "author": "Alexey Fateev <https://github.com/alesha-pro>",
